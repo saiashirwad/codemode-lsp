@@ -33,7 +33,7 @@ One round-trip. The filtering, looping, and chaining happen in code, not in LLM 
 - **Runtime**: Bun + TypeScript
 - **MCP**: `@modelcontextprotocol/sdk`, stdio transport
 - **LSP**: Direct JSON-RPC client over stdio. Spawn language servers as child processes.
-- **Sandbox**: Bun/Node `vm` module for executing LLM-generated code.
+- **Sandbox**: Bun/Node `vm` module for executing LLM-generated code. Not a security boundary — safety comes from exposing a narrow API surface, not from process isolation.
 
 ### One Tool
 
@@ -43,19 +43,21 @@ The LLM receives auto-generated type definitions for all available APIs so it ca
 
 ### LSP Primitives (internal APIs)
 
-These are **not** MCP tools. They are typed functions available inside the sandbox:
+These are **not** MCP tools. They are typed functions available inside the sandbox via the `lsp` object.
 
 **Read operations:**
-- `findSymbol(query)` — workspace symbol search
-- `findReferences(file, symbolPath)` — all references to a symbol
-- `getSymbols(file)` — document symbols (file outline / symbol tree)
-- `goToDefinition(file, symbolPath)` — jump to definition
+- `lsp.readFile(file)` — read file contents as string
+- `lsp.getSymbolBody(file, symbolPath)` — read source code of a specific symbol
+- `lsp.findSymbol(query)` — workspace symbol search
+- `lsp.findReferences(file, symbolPath)` — all references to a symbol
+- `lsp.getSymbols(file)` — document symbols (file outline / symbol tree)
+- `lsp.goToDefinition(file, symbolPath)` — jump to definition
 
 **Write operations:**
-- `renameSymbol(file, symbolPath, newName)` — LSP rename across codebase
-- `replaceSymbolBody(file, symbolPath, newText)` — replace a symbol's full declaration
-- `insertBeforeSymbol(file, symbolPath, text)` — insert code before a symbol
-- `insertAfterSymbol(file, symbolPath, text)` — insert code after a symbol
+- `lsp.renameSymbol(file, symbolPath, newName)` — LSP rename across codebase
+- `lsp.replaceSymbolBody(file, symbolPath, newText)` — replace a symbol's full declaration
+- `lsp.insertBeforeSymbol(file, symbolPath, text)` — insert code before a symbol
+- `lsp.insertAfterSymbol(file, symbolPath, text)` — insert code after a symbol
 
 All return structured objects. Write operations write directly to disk and notify the LSP.
 
@@ -92,6 +94,51 @@ All return structured objects. Write operations write directly to disk and notif
 
 - Server writes edits directly to disk (not diffs for client to apply).
 
+### Sandbox
+
+The vm sandbox exposes a minimal, controlled API surface:
+
+**Available:**
+- `lsp.*` — all LSP primitives listed above
+- JS builtins — Math, JSON, Array, Object, Map, Set, Promise, String, Number, Date, RegExp, etc.
+- `console.log/warn/error` — captured to a logs array, returned alongside the script result (not printed to stdout)
+
+**Not available:**
+- No `fetch` or network access
+- No `fs` / `require` / `import` — file reading goes through `lsp.readFile()`
+- No `setTimeout` / `setInterval` — LSP timing is handled internally
+- No `process`, `Bun`, `Deno`, or other runtime globals
+
+### Tool Description & Type Definitions
+
+The `execute` tool description includes auto-generated TypeScript type definitions for the entire `lsp.*` API surface. This gives the LLM IDE-like guidance when writing scripts.
+
+Type defs are generated from the actual API implementation (single source of truth) and embedded in the tool description via a `{{types}}` placeholder, similar to Cloudflare's approach.
+
+Example of what the LLM sees in the tool description:
+```typescript
+interface SymbolInfo { name: string; kind: SymbolKind; file: string; range: Range; }
+interface Reference { file: string; range: Range; context: string; symbolPath: string; }
+// ...
+
+declare const lsp: {
+  /** Read file contents */
+  readFile(file: string): Promise<string>;
+  /** Read source code of a specific symbol */
+  getSymbolBody(file: string, symbolPath: string): Promise<string>;
+  /** Workspace symbol search */
+  findSymbol(query: string): Promise<SymbolInfo[]>;
+  // ...
+}
+```
+
+The LLM writes a script body (no function wrapper needed), and the last expression is the return value:
+```typescript
+const refs = await lsp.findReferences("src/api.ts", "handleRequest");
+const deprecated = refs.filter(r => r.context.includes("deprecated"));
+deprecated.map(r => ({ file: r.file, line: r.range.start.line }));
+```
+
 ## Symbol Path Resolution
 
 Slash-separated, unlimited nesting depth. Walks the document symbol tree.
@@ -110,9 +157,11 @@ Ambiguity: if a bare name matches multiple symbols, return candidates for the sc
 
 ## Result Format
 
-The `execute` tool returns whatever the script returns. Scripts can return any serializable value — objects, arrays, strings.
+The `execute` tool returns:
+- **result**: whatever the script's last expression evaluates to. Any serializable value — objects, arrays, strings.
+- **logs**: array of captured `console.log/warn/error` calls from the script.
 
-For convenience, the LSP primitives return structured objects by default (symbol names, kinds, locations with file paths and ranges, context lines). Scripts can transform these however they like before returning.
+LSP primitives return structured objects by default (symbol names, kinds, locations with file paths and ranges, context lines). Scripts can transform these however they like before returning.
 
 ## Modules
 
