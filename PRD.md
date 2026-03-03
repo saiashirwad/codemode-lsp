@@ -76,15 +76,14 @@ All return structured objects. Write operations buffer in memory and notify the 
 
 ### Concurrency
 
-- **Read operations**: concurrent, safe to parallelize within a script.
-- **Write operations**: serialized via mutex. Second write waits.
+- Reads are safe to parallelize (no LSP state mutation).
+- Writes are naturally sequential — LLM scripts `await` each write. No mutex needed.
 
 ### Document Sync
 
 - `textDocument/didOpen` on first access to a file.
-- `textDocument/didChange` during script execution for buffered edits (LSP sees changes before disk flush).
-- `workspace/didChangeWatchedFiles` for external filesystem changes.
-- `textDocument/didClose` on idle timeout to prevent memory bloat.
+- `textDocument/didChange` during script execution for buffered edits (LSP sees changes before disk flush). See Transactional Writes for details.
+- No `didChangeWatchedFiles` or `didClose` idle timeout in v1. Language servers manage their own memory fine.
 
 ### LSP Crash Recovery
 
