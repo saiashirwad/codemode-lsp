@@ -71,9 +71,8 @@ All return structured objects. Write operations buffer in memory and notify the 
 
 ### Language Servers (v1)
 
-- **TypeScript**: `typescript-language-server`
-- **Python**: `pyright`
-- Auto-detect language from file extensions. One server instance per language.
+- **TypeScript only**: `typescript-language-server`
+- No Python/pyright in v1. Nothing in the architecture is TypeScript-specific — LSP protocol is language-agnostic, sandbox APIs (`lsp.findReferences`, etc.) don't know what server is behind them. Adding another language later = map file extensions → spawn the right server. `lsp-manager.ts` already abstracts this.
 
 ### Concurrency
 
