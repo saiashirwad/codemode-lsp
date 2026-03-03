@@ -1,18 +1,63 @@
 # codemode-lsp PRD
 
-MCP server providing semantic code retrieval and editing via LSP. For claude code, code-mode (cloudflare), and other MCP-capable agents.
+MCP server that exposes a single code-mode tool backed by LSP. The LLM writes TypeScript that chains semantic code operations, which run in a vm sandbox and return results.
 
-## Core Philosophy
+## Why
 
-Tools are **composable primitives for programmatic use**. Code-mode agents write TypeScript that calls these tools, filters results, and chains operations. Design for machine consumption first — return full data, let code filter.
+Traditional MCP servers like Serena expose many individual tools (Serena has ~49). Even a reduced set of 8 tools means the LLM has to:
 
-## Architecture Decisions
+1. Call `find_references` → get hundreds of results dumped into context
+2. Reason about filtering in natural language, or write temp files
+3. Call the next tool, one reference at a time
+4. Many round-trips, tons of tokens wasted, lots of noise
+
+With a code-mode approach (inspired by [Cloudflare's codemode](https://github.com/cloudflare/agents)), the LLM instead writes a single script:
+
+```typescript
+async () => {
+  const refs = await lsp.findReferences("src/api.ts", "handleRequest");
+  const relevant = refs.filter(r => r.context.includes("deprecated"));
+  for (const ref of relevant) {
+    await lsp.replaceSymbolBody(ref.file, ref.symbolPath, newImplementation);
+  }
+  return { modified: relevant.length };
+}
+```
+
+One round-trip. The filtering, looping, and chaining happen in code, not in LLM reasoning. LLMs are better at writing TypeScript than orchestrating dozens of tool calls — they've seen millions of lines of real code but only contrived tool-calling examples.
+
+## Architecture
 
 ### Runtime & Transport
 
 - **Runtime**: Bun + TypeScript
 - **MCP**: `@modelcontextprotocol/sdk`, stdio transport
 - **LSP**: Direct JSON-RPC client over stdio. Spawn language servers as child processes.
+- **Sandbox**: Bun/Node `vm` module for executing LLM-generated code.
+
+### One Tool
+
+The MCP server exposes a **single tool**: `execute`. It accepts TypeScript code as a string, runs it in a vm sandbox where LSP primitives are available as typed async APIs, and returns the result.
+
+The LLM receives auto-generated type definitions for all available APIs so it can write correct code with IDE-like guidance.
+
+### LSP Primitives (internal APIs)
+
+These are **not** MCP tools. They are typed functions available inside the sandbox:
+
+**Read operations:**
+- `findSymbol(query)` — workspace symbol search
+- `findReferences(file, symbolPath)` — all references to a symbol
+- `getSymbols(file)` — document symbols (file outline / symbol tree)
+- `goToDefinition(file, symbolPath)` — jump to definition
+
+**Write operations:**
+- `renameSymbol(file, symbolPath, newName)` — LSP rename across codebase
+- `replaceSymbolBody(file, symbolPath, newText)` — replace a symbol's full declaration
+- `insertBeforeSymbol(file, symbolPath, text)` — insert code before a symbol
+- `insertAfterSymbol(file, symbolPath, text)` — insert code after a symbol
+
+All return structured objects. Write operations write directly to disk and notify the LSP.
 
 ### Workspace
 
@@ -27,118 +72,55 @@ Tools are **composable primitives for programmatic use**. Code-mode agents write
 
 ### Concurrency
 
-- **Read tools** (find_symbol, find_references, get_symbols, go_to_definition): concurrent, safe to parallelize.
-- **Write tools** (rename_symbol, replace_symbol_body, insert_before/after): serialized via mutex. Second writer waits.
+- **Read operations**: concurrent, safe to parallelize within a script.
+- **Write operations**: serialized via mutex. Second write waits.
 
 ### Document Sync
 
 - `textDocument/didOpen` on first access to a file.
-- `textDocument/didChange` after our own edits so LSP index reflects truth.
+- `textDocument/didChange` after edits so LSP index stays current.
 - `workspace/didChangeWatchedFiles` for external filesystem changes.
-- `textDocument/didClose` on idle timeout to prevent memory bloat on large codebases.
-
-### Staleness
-
-- Server watches filesystem and sends `didChangeWatchedFiles` to LSP for external changes.
-- After own edits, always send `didChange` before returning — ensures next tool call sees updated state.
+- `textDocument/didClose` on idle timeout to prevent memory bloat.
 
 ### LSP Crash Recovery
 
 - Auto-restart crashed/unresponsive language server transparently.
 - Replay `didOpen` for all previously-open documents to restore state.
-- Failed call returns error so the agent knows something happened, but recovery is automatic for subsequent calls.
+- Failed call returns error to the script; recovery is automatic for subsequent calls.
 
 ### Edit Application
 
 - Server writes edits directly to disk (not diffs for client to apply).
-
-## Tools
-
-### Read Tools
-
-#### `find_symbol`
-
-Workspace symbol search. Returns all matching symbols across the project.
-
-- Input: `query` (string), `format?` ('json' | 'text')
-- Returns: symbol name, kind, location (file, range), container name
-
-#### `find_references`
-
-All references to a symbol.
-
-- Input: `file` (string), `symbol_path` (string), `format?` ('json' | 'text')
-- Returns: all reference locations (file, range, context line)
-
-#### `get_symbols`
-
-Document symbols — file outline / symbol tree.
-
-- Input: `file` (string), `format?` ('json' | 'text')
-- Returns: hierarchical symbol tree (name, kind, range, children)
-
-#### `go_to_definition`
-
-Jump to where a symbol is defined.
-
-- Input: `file` (string), `symbol_path` (string), `format?` ('json' | 'text')
-- Returns: definition location (file, range, preview)
-
-### Write Tools
-
-#### `rename_symbol`
-
-LSP rename across the entire codebase.
-
-- Input: `file` (string), `symbol_path` (string), `new_name` (string)
-- Writes all affected files to disk. Returns list of changed files.
-
-#### `replace_symbol_body`
-
-Replace a symbol's **full declaration** — signature, body, decorators, JSDoc. Everything.
-
-- Input: `file` (string), `symbol_path` (string), `new_text` (string)
-- Writes to disk. Returns the file path and replaced range.
-
-#### `insert_before_symbol` / `insert_after_symbol`
-
-Insert code relative to a symbol.
-
-- Input: `file` (string), `symbol_path` (string), `text` (string)
-- **Indentation**: Server detects target symbol's base indentation. Agent provides code starting at column 0 with relative indentation. Server applies base indent.
-- Writes to disk. Returns the file path and inserted range.
 
 ## Symbol Path Resolution
 
 Slash-separated, unlimited nesting depth. Walks the document symbol tree.
 
 ```
-"MyClass"                    → top-level class
-"MyClass/constructor"        → class constructor
-"MyClass/myMethod"           → class method
+"MyClass"                      → top-level class
+"MyClass/constructor"          → class constructor
+"MyClass/myMethod"             → class method
 "OuterClass/InnerClass/method" → deeply nested
-"myFunction"                 → top-level function
-"config"                     → variable (arrow fns use their variable name)
-"router/get"                 → object literal property
+"myFunction"                   → top-level function
+"config"                       → variable (arrow fns use their variable name)
+"router/get"                   → object literal property
 ```
 
-Ambiguity: if a bare name matches multiple symbols, server returns candidates for the agent to disambiguate.
+Ambiguity: if a bare name matches multiple symbols, return candidates for the script to disambiguate.
 
 ## Result Format
 
-Content-type negotiation per-call via `format` parameter:
+The `execute` tool returns whatever the script returns. Scripts can return any serializable value — objects, arrays, strings.
 
-- **`json`** (default): Structured objects with URIs, ranges, symbol kinds. For programmatic consumption by code-mode scripts.
-- **`text`**: Human/LLM-readable summaries with `file:line` references and code snippets. For direct agent consumption.
-
-All results returned in full — no pagination, no truncation. Code-mode scripts handle filtering.
+For convenience, the LSP primitives return structured objects by default (symbol names, kinds, locations with file paths and ranges, context lines). Scripts can transform these however they like before returning.
 
 ## Modules
 
-- `mcp-server.ts` — MCP server setup, tool registration, stdio transport
+- `mcp-server.ts` — MCP server setup, single `execute` tool registration, stdio transport
 - `lsp-client.ts` — spawn language server, JSON-RPC with Content-Length framing, init handshake, crash recovery
 - `lsp-manager.ts` — manage multiple language servers (one per language), auto-detect from file extensions, idle timeout
-- `tools/` — tool implementations, each wraps LSP call(s) + formats result
+- `sandbox.ts` — vm sandbox setup, inject LSP primitives as typed APIs, execute LLM-generated code
+- `lsp-api.ts` — the internal API surface exposed inside the sandbox (wraps LSP calls into clean async functions)
 - `symbol.ts` — symbol path resolution (slash-separated path → LSP positions via document symbols)
 
 ## Open Questions
