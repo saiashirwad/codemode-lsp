@@ -1,6 +1,6 @@
 # codemode-lsp PRD
 
-MCP server that exposes a single code-mode tool backed by LSP. The LLM writes TypeScript that chains semantic code operations, which run in a vm sandbox and return results.
+MCP server that exposes a single code-mode tool backed by LSP. The LLM writes JavaScript that chains semantic code operations, which run in a vm sandbox and return results.
 
 ## Why
 
@@ -13,18 +13,17 @@ Traditional MCP servers like Serena expose many individual tools (Serena has ~49
 
 With a code-mode approach (inspired by [Cloudflare's codemode](https://github.com/cloudflare/agents)), the LLM instead writes a single script:
 
-```typescript
-async () => {
-  const refs = await lsp.findReferences("src/api.ts", "handleRequest");
-  const relevant = refs.filter(r => r.context.includes("deprecated"));
-  for (const ref of relevant) {
-    await lsp.replaceSymbolBody(ref.file, ref.symbolPath, newImplementation);
-  }
-  return { modified: relevant.length };
+```javascript
+const refs = await lsp.findReferences("src/api.ts", "handleRequest");
+const relevant = refs.filter((r) => r.context.includes("deprecated"));
+const newImpl = "function handleRequest(req) { return newHandler(req); }";
+for (const ref of relevant) {
+  await lsp.replaceSymbolBody(ref.file, ref.symbolPath, newImpl);
 }
+({ modified: relevant.length });
 ```
 
-One round-trip. The filtering, looping, and chaining happen in code, not in LLM reasoning. LLMs are better at writing TypeScript than orchestrating dozens of tool calls — they've seen millions of lines of real code but only contrived tool-calling examples.
+One round-trip. The filtering, looping, and chaining happen in code, not in LLM reasoning. LLMs are better at writing code than orchestrating dozens of tool calls — they've seen millions of lines of real code but only contrived tool-calling examples.
 
 ## Architecture
 
@@ -37,15 +36,16 @@ One round-trip. The filtering, looping, and chaining happen in code, not in LLM 
 
 ### One Tool
 
-The MCP server exposes a **single tool**: `execute`. It accepts TypeScript code as a string, runs it in a vm sandbox where LSP primitives are available as typed async APIs, and returns the result.
+The MCP server exposes a **single tool**: `execute`. It accepts JavaScript code as a string, runs it in a vm sandbox where LSP primitives are available as async APIs, and returns the result.
 
-The LLM receives auto-generated type definitions for all available APIs so it can write correct code with IDE-like guidance.
+The LLM receives TypeScript type definitions in the tool description for API shape guidance, but scripts themselves are plain JavaScript (no transpile step needed).
 
 ### LSP Primitives (internal APIs)
 
 These are **not** MCP tools. They are typed functions available inside the sandbox via the `lsp` object.
 
 **Read operations:**
+
 - `lsp.readFile(file)` — read file contents as string
 - `lsp.getSymbolBody(file, symbolPath)` — read source code of a specific symbol
 - `lsp.findSymbol(query)` — workspace symbol search
@@ -54,17 +54,20 @@ These are **not** MCP tools. They are typed functions available inside the sandb
 - `lsp.goToDefinition(file, symbolPath)` — jump to definition
 
 **Write operations:**
+
 - `lsp.renameSymbol(file, symbolPath, newName)` — LSP rename across codebase
 - `lsp.replaceSymbolBody(file, symbolPath, newText)` — replace a symbol's full declaration
 - `lsp.insertBeforeSymbol(file, symbolPath, text)` — insert code before a symbol
 - `lsp.insertAfterSymbol(file, symbolPath, text)` — insert code after a symbol
 
-All return structured objects. Write operations write directly to disk and notify the LSP.
+All return structured objects. Write operations buffer in memory and notify the LSP via `didChange`; flushed to disk only when the script completes successfully (see Transactional Writes).
 
 ### Workspace
 
-- Auto-detect workspace root from server's cwd — walk up to find `.git`, `package.json`, etc.
-- No explicit init step required from client.
+- Workspace root = server's cwd. No walking up, no auto-detection.
+- Client controls root by spawning the server from the desired directory.
+- Single root only. No multi-root workspace support.
+- No config file in v1. Add one when there are multiple things to configure.
 
 ### Language Servers (v1)
 
@@ -80,7 +83,7 @@ All return structured objects. Write operations write directly to disk and notif
 ### Document Sync
 
 - `textDocument/didOpen` on first access to a file.
-- `textDocument/didChange` after edits so LSP index stays current.
+- `textDocument/didChange` during script execution for buffered edits (LSP sees changes before disk flush).
 - `workspace/didChangeWatchedFiles` for external filesystem changes.
 - `textDocument/didClose` on idle timeout to prevent memory bloat.
 
@@ -90,20 +93,29 @@ All return structured objects. Write operations write directly to disk and notif
 - Replay `didOpen` for all previously-open documents to restore state.
 - Failed call returns error to the script; recovery is automatic for subsequent calls.
 
-### Edit Application
+### Edit Application (Transactional Writes)
 
-- Server writes edits directly to disk (not diffs for client to apply).
+Write operations buffer in memory during script execution — nothing hits disk until the script completes successfully.
+
+1. Script calls a write operation → update in-memory buffer, send `textDocument/didChange` to LSP so it sees the edit. No disk write yet.
+2. Subsequent reads within the same script see the updated state (LSP is aware of the buffered changes).
+3. Script completes successfully → flush all dirty buffers to disk.
+4. Script throws → discard dirty buffers, restore LSP state to originals (`didChange` back or `didClose`+`didOpen`). Disk untouched.
+
+This gives automatic rollback on failure with zero overhead on success. The LLM gets the error, rewrites the script, retries on a clean codebase.
 
 ### Sandbox
 
 The vm sandbox exposes a minimal, controlled API surface:
 
 **Available:**
+
 - `lsp.*` — all LSP primitives listed above
 - JS builtins — Math, JSON, Array, Object, Map, Set, Promise, String, Number, Date, RegExp, etc.
 - `console.log/warn/error` — captured to a logs array, returned alongside the script result (not printed to stdout)
 
 **Not available:**
+
 - No `fetch` or network access
 - No `fs` / `require` / `import` — file reading goes through `lsp.readFile()`
 - No `setTimeout` / `setInterval` — LSP timing is handled internally
@@ -116,9 +128,20 @@ The `execute` tool description includes auto-generated TypeScript type definitio
 Type defs are generated from the actual API implementation (single source of truth) and embedded in the tool description via a `{{types}}` placeholder, similar to Cloudflare's approach.
 
 Example of what the LLM sees in the tool description:
+
 ```typescript
-interface SymbolInfo { name: string; kind: SymbolKind; file: string; range: Range; }
-interface Reference { file: string; range: Range; context: string; symbolPath: string; }
+interface SymbolInfo {
+  name: string;
+  kind: SymbolKind;
+  file: string;
+  range: Range;
+}
+interface Reference {
+  file: string;
+  range: Range;
+  context: string;
+  symbolPath: string;
+}
 // ...
 
 declare const lsp: {
@@ -129,14 +152,15 @@ declare const lsp: {
   /** Workspace symbol search */
   findSymbol(query: string): Promise<SymbolInfo[]>;
   // ...
-}
+};
 ```
 
 The LLM writes a script body (no function wrapper needed), and the last expression is the return value:
-```typescript
+
+```javascript
 const refs = await lsp.findReferences("src/api.ts", "handleRequest");
-const deprecated = refs.filter(r => r.context.includes("deprecated"));
-deprecated.map(r => ({ file: r.file, line: r.range.start.line }));
+const deprecated = refs.filter((r) => r.context.includes("deprecated"));
+deprecated.map((r) => ({ file: r.file, line: r.range.start.line }));
 ```
 
 ## Symbol Path Resolution
@@ -158,6 +182,7 @@ Ambiguity: if a bare name matches multiple symbols, return candidates for the sc
 ## Result Format
 
 The `execute` tool returns:
+
 - **result**: whatever the script's last expression evaluates to. Any serializable value — objects, arrays, strings.
 - **logs**: array of captured `console.log/warn/error` calls from the script.
 
