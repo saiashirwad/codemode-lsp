@@ -87,9 +87,9 @@ All return structured objects. Write operations buffer in memory and notify the 
 
 ### LSP Crash Recovery
 
-- Auto-restart crashed/unresponsive language server transparently.
-- Replay `didOpen` for all previously-open documents to restore state.
-- Failed call returns error to the script; recovery is automatic for subsequent calls.
+- LSP dies mid-script → script fails, buffered edits roll back automatically.
+- Next `execute` call detects dead server → respawns + init handshake → `didOpen` happens naturally as the new script touches files.
+- No replay of previously-open documents, no mid-script recovery. Keep it simple.
 
 ### Edit Application (Transactional Writes)
 
@@ -123,7 +123,7 @@ The vm sandbox exposes a minimal, controlled API surface:
 
 The `execute` tool description includes auto-generated TypeScript type definitions for the entire `lsp.*` API surface. This gives the LLM IDE-like guidance when writing scripts.
 
-Type defs are generated from the actual API implementation (single source of truth) and embedded in the tool description via a `{{types}}` placeholder, similar to Cloudflare's approach.
+Type defs are generated from the actual API implementation (single source of truth). Build step runs `tsc --declaration --emitDeclarationOnly` on `lsp-api.ts`, reads the `.d.ts` output, and embeds it in the tool description via a `{{types}}` placeholder.
 
 Example of what the LLM sees in the tool description:
 
