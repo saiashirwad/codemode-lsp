@@ -1,5 +1,7 @@
 # codemode-lsp Vision
 
+> **Superseded.** This was a working document; the consolidated spec of record is `PRD.md`. Where they disagree, `PRD.md` wins (see its Decision Log).
+
 Final vision document synthesized from four expert analyses: LSP protocol constraints, LLM behavior patterns, systems architecture, and product/competitive critique.
 
 ## Core Thesis
