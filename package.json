@@ -1,0 +1,28 @@
+{
+  "name": "codemode-lsp",
+  "version": "0.1.0",
+  "description": "MCP server exposing a single code-mode tool backed by LSP",
+  "type": "module",
+  "private": true,
+  "scripts": {
+    "check": "bun run typecheck && bun run lint && bun test",
+    "typecheck": "tsc --noEmit",
+    "lint": "biome check .",
+    "fix": "biome check --write .",
+    "test": "bun test",
+    "test:unit": "bun test test/unit",
+    "test:integration": "bun test test/integration"
+  },
+  "dependencies": {
+    "@modelcontextprotocol/sdk": "^1.0.0",
+    "acorn": "^8.0.0",
+    "vscode-jsonrpc": "^8.2.0",
+    "vscode-languageserver-protocol": "^3.17.0"
+  },
+  "devDependencies": {
+    "@biomejs/biome": "^2.0.0",
+    "@types/bun": "^1.0.0",
+    "typescript": "^5.0.0",
+    "typescript-language-server": "^4.0.0"
+  }
+}

@@ -1,0 +1,16 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(bun install)",
+      "Bash(bun install:*)",
+      "Bash(bun test:*)",
+      "Bash(bun run check)",
+      "Bash(bun run typecheck)",
+      "Bash(bun run lint)",
+      "Bash(bun run fix)",
+      "Bash(bun run test:*)",
+      "Bash(bunx biome:*)",
+      "Bash(bunx tsc:*)"
+    ]
+  }
+}
