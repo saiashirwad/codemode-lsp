@@ -93,9 +93,79 @@ describe("LspClient (integration, real typescript-language-server)", () => {
     },
     { timeout: 30_000 },
   );
+
+  test(
+    "start is single-flight under concurrent callers",
+    async () => {
+      await Promise.all([client.start(), client.start(), client.start()]);
+      await client.ready();
+      const symbols = (await client.documentSymbol(
+        "src/auth.ts",
+      )) as DocumentSymbol[];
+      expect(symbols.map((s) => s.name)).toContain("AuthService");
+      expect(client.isAlive()).toBe(true);
+    },
+    { timeout: 30_000 },
+  );
 });
 
+const fakeServerScript = `#!/usr/bin/env node
+let buffer = Buffer.alloc(0);
+function send(message) {
+  const json = JSON.stringify(message);
+  process.stdout.write(\`Content-Length: \${Buffer.byteLength(json, "utf8")}\\r\\n\\r\\n\${json}\`);
+}
+function handle(message) {
+  if (message.method === "initialize") {
+    send({
+      jsonrpc: "2.0",
+      id: message.id,
+      result: { capabilities: { textDocumentSync: 1, documentSymbolProvider: true } },
+    });
+  } else if (message.method === "shutdown") {
+    send({ jsonrpc: "2.0", id: message.id, result: null });
+  } else if (message.method === "textDocument/documentSymbol") {
+    // Intentionally leave the request in flight until the process is killed.
+  }
+}
+process.stdin.on("data", (chunk) => {
+  buffer = Buffer.concat([buffer, chunk]);
+  while (true) {
+    const headerEnd = buffer.indexOf("\\r\\n\\r\\n");
+    if (headerEnd === -1) return;
+    const header = buffer.slice(0, headerEnd).toString("utf8");
+    const match = /Content-Length: (\\d+)/i.exec(header);
+    if (!match) process.exit(2);
+    const length = Number(match[1]);
+    const bodyStart = headerEnd + 4;
+    const bodyEnd = bodyStart + length;
+    if (buffer.length < bodyEnd) return;
+    const body = buffer.slice(bodyStart, bodyEnd).toString("utf8");
+    buffer = buffer.slice(bodyEnd);
+    handle(JSON.parse(body));
+  }
+});
+`;
+
 describe("LspClient handshake failure", () => {
+  test(
+    "bad language-server binaries fail fast with a spawn error",
+    async () => {
+      const client = new LspClient({
+        rootDir: sampleFixtureDir,
+        lspBin: join(sampleFixtureDir, "missing-language-server"),
+        requestTimeoutMs: 5_000,
+      });
+      try {
+        await expect(client.start()).rejects.toThrow(/Could not spawn/);
+        expect(client.isAlive()).toBe(false);
+      } finally {
+        await client.stop();
+      }
+    },
+    { timeout: 30_000 },
+  );
+
   test(
     "a server that never answers initialize is torn down, not left healthy",
     async () => {
@@ -116,6 +186,38 @@ describe("LspClient handshake failure", () => {
         await expect(client.start()).rejects.toThrow(/timed out/);
         // The wedged process must be reported dead so the next op retries.
         expect(client.isAlive()).toBe(false);
+      } finally {
+        await client.stop();
+        rmSync(dir, { recursive: true, force: true });
+      }
+    },
+    { timeout: 30_000 },
+  );
+
+  test(
+    "server death rejects an in-flight request before the request timeout",
+    async () => {
+      const dir = mkdtempSync(join(tmpdir(), "codemode-fakelsp-"));
+      const fake = join(dir, "fake-lsp.js");
+      writeFileSync(fake, fakeServerScript);
+      chmodSync(fake, 0o755);
+
+      const client = new LspClient({
+        rootDir: sampleFixtureDir,
+        lspBin: fake,
+        requestTimeoutMs: 5_000,
+        warmupTimeoutMs: 1,
+      });
+      try {
+        await client.start();
+        await client.ready();
+        const started = Date.now();
+        const pending = client.documentSymbol("src/auth.ts");
+        setTimeout(() => void client.killServer(), 50);
+        await expect(pending).rejects.toThrow(
+          /closed|disposed|connection|cancel/i,
+        );
+        expect(Date.now() - started).toBeLessThan(2_000);
       } finally {
         await client.stop();
         rmSync(dir, { recursive: true, force: true });

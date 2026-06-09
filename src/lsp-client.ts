@@ -13,9 +13,16 @@ import {
   StreamMessageWriter,
 } from "vscode-jsonrpc/node";
 import type {
+  Definition,
+  Diagnostic,
   DocumentSymbol,
   InitializeResult,
+  Location,
+  LocationLink,
+  Position,
+  PublishDiagnosticsParams,
   SymbolInformation,
+  WorkspaceSymbol,
 } from "vscode-languageserver-protocol";
 
 /**
@@ -59,6 +66,7 @@ function deferred<T>(): Deferred<T> {
 }
 
 const WARMUP_SKIP_DIRS = new Set(["node_modules", ".git", "dist"]);
+const MAX_STDERR_CHARS = 8 * 1024;
 
 /** Find any TypeScript source file under `root` to proactively open for warmup. */
 function findWarmupFile(root: string): string | null {
@@ -88,6 +96,23 @@ function findWarmupFile(root: string): string | null {
   return null;
 }
 
+function isLocationLink(value: Location | LocationLink): value is LocationLink {
+  return "targetUri" in value;
+}
+
+function normalizeDefinition(
+  result: Definition | LocationLink[] | null,
+): Location[] {
+  if (!result) return [];
+  const values = Array.isArray(result) ? result : [result];
+  return values.map((value) => {
+    if (isLocationLink(value)) {
+      return { uri: value.targetUri, range: value.targetSelectionRange };
+    }
+    return value;
+  });
+}
+
 export interface LspClientOptions {
   /** Workspace root. The server is spawned with this cwd. Defaults to process.cwd(). */
   rootDir?: string;
@@ -97,6 +122,11 @@ export interface LspClientOptions {
   requestTimeoutMs?: number;
   /** Max time to wait for the readiness signal before proceeding anyway (default 3_000). */
   warmupTimeoutMs?: number;
+}
+
+export interface UriPosition {
+  uri: string;
+  position: Position;
 }
 
 /**
@@ -116,6 +146,9 @@ export class LspClient {
   private proc: ChildProcess | null = null;
   private connection: MessageConnection | null = null;
   private alive = false;
+  private startPromise: Promise<void> | null = null;
+  private spawnError: Error | null = null;
+  private recentStderr = "";
 
   private warmupPromise: Promise<void> | null = null;
   private readyDeferred: Deferred<void> | null = null;
@@ -124,6 +157,9 @@ export class LspClient {
 
   /** URIs the current server has an open document for, with their version. */
   private readonly openVersions = new Map<string, number>();
+  private readonly diagnosticsByUri = new Map<string, Diagnostic[]>();
+  private readonly diagnosticsPublishedUris = new Set<string>();
+  private readonly touchedUris = new Set<string>();
 
   constructor(options: LspClientOptions = {}) {
     this.rootDir = options.rootDir ?? process.cwd();
@@ -137,14 +173,12 @@ export class LspClient {
 
   /** Spawn the server and complete the handshake; warmup runs in the background. */
   async start(): Promise<void> {
-    this.teardownProcess();
-    this.openVersions.clear();
-    this.readyResolved = false;
-    const ready = deferred<void>();
-    this.readyDeferred = ready;
-    this.warmupPromise = ready.promise;
-    await this.spawnAndHandshake();
-    this.launchWarmup();
+    if (this.isAlive()) return;
+    if (this.startPromise) return this.startPromise;
+    this.startPromise = this.startFresh().finally(() => {
+      this.startPromise = null;
+    });
+    return this.startPromise;
   }
 
   /** Resolve once warmup has completed (or the warmup fallback has elapsed). */
@@ -164,8 +198,7 @@ export class LspClient {
 
   /** Respawn + re-handshake if the server has died. No-op when healthy. */
   async ensureAlive(): Promise<void> {
-    if (this.isAlive()) return;
-    await this.start();
+    if (!this.isAlive()) await this.start();
     await this.ready();
   }
 
@@ -174,16 +207,86 @@ export class LspClient {
     file: string,
   ): Promise<DocumentSymbol[] | SymbolInformation[]> {
     await this.ensureAlive();
-    // The first request waits for warmup (§ Initialization & warmup): a caller
-    // who does start() then documentSymbol() without ready() must still gate.
-    await this.ready();
     const abs = isAbsolute(file) ? file : join(this.rootDir, file);
-    this.openIfNeeded(abs);
+    this.openTextDocument(abs);
     const uri = pathToFileURL(abs).href;
     const result = await this.request<
       DocumentSymbol[] | SymbolInformation[] | null
     >("textDocument/documentSymbol", { textDocument: { uri } });
     return result ?? [];
+  }
+
+  async workspaceSymbol(
+    query: string,
+  ): Promise<Array<SymbolInformation | WorkspaceSymbol>> {
+    await this.ensureAlive();
+    const result = await this.request<Array<
+      SymbolInformation | WorkspaceSymbol
+    > | null>("workspace/symbol", { query });
+    return result ?? [];
+  }
+
+  async references(params: UriPosition): Promise<Location[]> {
+    await this.ensureAlive();
+    const result = await this.request<Location[] | null>(
+      "textDocument/references",
+      {
+        textDocument: { uri: params.uri },
+        position: params.position,
+        context: { includeDeclaration: true },
+      },
+    );
+    return result ?? [];
+  }
+
+  async definition(params: UriPosition): Promise<Location[]> {
+    await this.ensureAlive();
+    const result = await this.request<Definition | LocationLink[] | null>(
+      "textDocument/definition",
+      { textDocument: { uri: params.uri }, position: params.position },
+    );
+    return normalizeDefinition(result);
+  }
+
+  openTextDocument(abs: string): void {
+    const uri = pathToFileURL(abs).href;
+    if (this.openVersions.has(uri)) return;
+    const conn = this.connection;
+    if (!conn || !this.isAlive()) throw new Error("LSP not started");
+    const text = readFileSync(abs, "utf8");
+    const languageId = abs.endsWith(".tsx") ? "typescriptreact" : "typescript";
+    conn.sendNotification("textDocument/didOpen", {
+      textDocument: { uri, languageId, version: 1, text },
+    });
+    this.openVersions.set(uri, 1);
+    this.touchedUris.add(uri);
+  }
+
+  getOpenDocumentVersion(abs: string): number | undefined {
+    return this.openVersions.get(pathToFileURL(abs).href);
+  }
+
+  getDiagnosticsForUris(uris?: string[]): Diagnostic[] {
+    const sourceUris = uris ?? [...this.touchedUris];
+    return sourceUris.flatMap((uri) => this.diagnosticsByUri.get(uri) ?? []);
+  }
+
+  getTouchedUris(): string[] {
+    return [...this.touchedUris];
+  }
+
+  async waitForDiagnosticsForUris(
+    uris: string[],
+    timeoutMs = 2_000,
+  ): Promise<Diagnostic[]> {
+    const started = Date.now();
+    while (Date.now() - started < timeoutMs) {
+      if (uris.every((uri) => this.diagnosticsPublishedUris.has(uri))) {
+        return this.getDiagnosticsForUris(uris);
+      }
+      await new Promise((resolve) => setTimeout(resolve, 25));
+    }
+    return this.getDiagnosticsForUris(uris);
   }
 
   /**
@@ -198,7 +301,7 @@ export class LspClient {
       proc.once("exit", () => resolve());
       proc.kill("SIGKILL");
     });
-    this.alive = false;
+    this.markDead(true);
   }
 
   /** Graceful shutdown: `shutdown` request, `exit` notification, dispose. */
@@ -215,6 +318,20 @@ export class LspClient {
     this.teardownProcess();
   }
 
+  private async startFresh(): Promise<void> {
+    this.teardownProcess();
+    this.openVersions.clear();
+    this.readyResolved = false;
+    this.spawnError = null;
+    this.diagnosticsPublishedUris.clear();
+    this.diagnosticsByUri.clear();
+    const ready = deferred<void>();
+    this.readyDeferred = ready;
+    this.warmupPromise = ready.promise;
+    await this.spawnAndHandshake();
+    this.launchWarmup();
+  }
+
   private async spawnAndHandshake(): Promise<void> {
     const proc = spawn(this.lspBin, ["--stdio"], {
       cwd: this.rootDir,
@@ -225,11 +342,18 @@ export class LspClient {
       throw new Error("Failed to open language-server stdio streams");
     }
     this.proc = proc;
-    proc.on("exit", () => {
-      this.alive = false;
+    proc.stderr?.on("data", (chunk: Buffer | string) => {
+      this.appendStderr(String(chunk));
     });
-    proc.on("error", () => {
-      this.alive = false;
+    proc.on("exit", () => {
+      if (this.proc === proc) this.markDead(true);
+    });
+    const spawnErrorPromise = new Promise<never>((_resolve, reject) => {
+      proc.once("error", (error) => {
+        this.spawnError = error;
+        if (this.proc === proc) this.markDead(true);
+        reject(this.formatSpawnError(error));
+      });
     });
 
     const connection = createMessageConnection(
@@ -237,11 +361,16 @@ export class LspClient {
       new StreamMessageWriter(proc.stdin),
     );
     connection.onClose(() => {
-      this.alive = false;
+      if (this.connection === connection) this.markDead(false);
     });
-    connection.onError((error) => {
-      console.error("[lsp] connection error:", error[0]?.message ?? error[0]);
-    });
+    connection.onNotification(
+      "textDocument/publishDiagnostics",
+      (params: PublishDiagnosticsParams) => {
+        this.diagnosticsByUri.set(params.uri, params.diagnostics);
+        this.diagnosticsPublishedUris.add(params.uri);
+        this.touchedUris.add(params.uri);
+      },
+    );
     // Readiness signals. typescript-language-server emits `$/typescriptVersion`
     // after `initialized`; `experimental/serverStatus` is honored per the PRD
     // even though TLS does not send it (see Decision Log). Whichever arrives
@@ -261,14 +390,15 @@ export class LspClient {
     // down so isAlive() reports dead and the next ensureAlive() retries —
     // otherwise a wedged-but-running server would be reported healthy forever.
     try {
-      await this.request<InitializeResult>(
-        "initialize",
-        this.initializeParams(),
-      );
+      await Promise.race([
+        this.request<InitializeResult>("initialize", this.initializeParams()),
+        spawnErrorPromise,
+      ]);
       connection.sendNotification("initialized", {});
     } catch (error) {
       this.teardownProcess();
-      throw error;
+      if (this.spawnError) throw this.formatSpawnError(this.spawnError);
+      throw this.withRecentStderr(error);
     }
   }
 
@@ -282,6 +412,11 @@ export class LspClient {
       capabilities: {
         textDocument: {
           documentSymbol: { hierarchicalDocumentSymbolSupport: true },
+          definition: { linkSupport: false },
+          references: {},
+        },
+        workspace: {
+          symbol: {},
         },
       },
     };
@@ -292,7 +427,7 @@ export class LspClient {
     const file = findWarmupFile(this.rootDir);
     if (file) {
       try {
-        this.openIfNeeded(file);
+        this.openTextDocument(file);
       } catch {
         // Warmup is best-effort; readiness still resolves via signal/fallback.
       }
@@ -309,19 +444,6 @@ export class LspClient {
     this.readyDeferred?.resolve();
   }
 
-  private openIfNeeded(abs: string): void {
-    const uri = pathToFileURL(abs).href;
-    if (this.openVersions.has(uri)) return;
-    const conn = this.connection;
-    if (!conn) throw new Error("LSP not started");
-    const text = readFileSync(abs, "utf8");
-    const languageId = abs.endsWith(".tsx") ? "typescriptreact" : "typescript";
-    conn.sendNotification("textDocument/didOpen", {
-      textDocument: { uri, languageId, version: 1, text },
-    });
-    this.openVersions.set(uri, 1);
-  }
-
   private request<R>(method: string, params?: unknown): Promise<R> {
     const conn = this.connection;
     if (!conn) throw new Error("LSP not started");
@@ -335,16 +457,63 @@ export class LspClient {
     );
   }
 
+  private appendStderr(chunk: string): void {
+    this.recentStderr = `${this.recentStderr}${chunk}`;
+    if (this.recentStderr.length > MAX_STDERR_CHARS) {
+      this.recentStderr = this.recentStderr.slice(-MAX_STDERR_CHARS);
+    }
+  }
+
+  private formatSpawnError(error: unknown): Error {
+    const message = error instanceof Error ? error.message : String(error);
+    return this.withRecentStderr(
+      new Error(
+        `Could not spawn TypeScript language server at "${this.lspBin}": ${message}`,
+      ),
+    );
+  }
+
+  private withRecentStderr(error: unknown): Error {
+    const base = error instanceof Error ? error : new Error(String(error));
+    if (!this.recentStderr.trim()) return base;
+    return new Error(
+      `${base.message}\nRecent language-server stderr:\n${this.recentStderr.trim()}`,
+    );
+  }
+
+  private markDead(disposeConnection: boolean): void {
+    this.alive = false;
+    this.openVersions.clear();
+    if (this.warmupTimer) {
+      clearTimeout(this.warmupTimer);
+      this.warmupTimer = null;
+    }
+    if (disposeConnection) {
+      const conn = this.connection;
+      this.connection = null;
+      try {
+        conn?.dispose();
+      } catch {
+        // dispose is best-effort; the server is already dead.
+      }
+    }
+  }
+
   private teardownProcess(): void {
-    this.connection?.dispose();
+    const conn = this.connection;
+    this.connection = null;
+    try {
+      conn?.dispose();
+    } catch {
+      // ignore teardown disposal errors
+    }
     const proc = this.proc;
+    this.proc = null;
     if (proc && proc.exitCode === null) proc.kill();
     if (this.warmupTimer) {
       clearTimeout(this.warmupTimer);
       this.warmupTimer = null;
     }
-    this.connection = null;
-    this.proc = null;
     this.alive = false;
   }
 }
