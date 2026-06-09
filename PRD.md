@@ -44,10 +44,11 @@ TypeScript only: `typescript-language-server --stdio`. Nothing in the architectu
 
 ### The `execute` Tool
 
-Accepts JavaScript code as a string. Runs it in the sandbox where `lsp.*` is available. Returns `{ result, logs }`.
+Accepts JavaScript code as a string. Runs it in the sandbox where `lsp.*` is available. Returns `{ result, logs, changes }`.
 
 - **result**: what the script's last expression evaluates to (JSON-serialized).
 - **logs**: captured `console.log/warn/error` calls, in order.
+- **changes**: what actually hit disk, one entry per flushed file: `{ file, kind: "modified" | "created" | "deleted", diff }` where `diff` is a unified diff against the pre-script content. Empty for read-only scripts. Nearly free to produce — the buffer already holds original + final content — and it lets the calling agent verify the edit did what it intended (and lets a human review it) without re-reading files. Diffs count toward the result size cap.
 
 **Code normalization** (Cloudflare's `normalizeCode()` pattern): accept bare statements, an async arrow function, or a script with implicit last-expression return. Parse with acorn to detect the format. If the last statement is an expression, return it. If the returned value is a Promise, auto-await it (prevents the silent `[object Promise]` footgun).
 
@@ -62,6 +63,19 @@ Accepts JavaScript code as a string. Runs it in the sandbox where `lsp.*` is ava
 ### Errors
 
 All `lsp.*` failures throw real JS `Error`s inside the sandbox, so scripts can `try/catch` and self-correct mid-script. Uncaught errors fail the script: the tool returns the error message + any logs captured so far, and all buffered writes roll back.
+
+**Operation trace on failure**: every `lsp.*` call is recorded as it runs (function name, key arguments, one-line outcome — e.g. `findReferences(src/api.ts, handleRequest) → 14 results`). When a script fails, the trace is returned alongside the error:
+
+```
+completed:
+  1. findReferences("src/api.ts", "handleRequest") → 14 results
+  2. replaceSymbolBody("src/a.ts", "wrapA") → ok
+failed at:
+  3. replaceSymbolBody("src/b.ts", "Foo/bar") → Symbol "Foo/bar" not found in "src/b.ts". Available top-level symbols: Foo, helper. Foo has children: baz, qux.
+All buffered changes were rolled back; the codebase is unchanged.
+```
+
+The model sees exactly where its script died, what had succeeded up to that point, and that the rollback happened — so the rewritten script can resume reasoning instead of rediscovering state. On success the trace is dropped (the result is what matters).
 
 Error messages target LLMs, not humans — include enough state to self-correct without another discovery call. See [Symbol Path Resolution](#symbol-path-resolution) for examples.
 
@@ -257,10 +271,11 @@ Push-based: handle `textDocument/publishDiagnostics`, store per-URI in a `Map`. 
 
 ## Configuration
 
-No config file in v1. Two env vars:
+No config file in v1. Three env vars:
 
 - `CODEMODE_TIMEOUT_MS` — script timeout (default 30000)
 - `CODEMODE_LSP_BIN` — language server command (default `typescript-language-server`)
+- `CODEMODE_READONLY` — when set to `1`/`true`, the 7 write operations are removed from the sandbox, the generated type definitions, and the tool description (the LLM never sees them, so it never tries them; read ops and `getDiagnostics` remain). The trust story for first contact: point it at a repo and it physically cannot write.
 
 Workspace root = server cwd. Single root. Client controls it by spawning the server from the desired directory.
 
@@ -284,14 +299,16 @@ No `lsp-manager.ts` in v1 — single language server needs no manager. Extract w
 - **Integration tests against the real `typescript-language-server`** are the core suite — the failure modes that matter (symbol resolution, rename fan-out, diagnostics timing, rollback) only show up against the real server. Run with `bun test`.
 - **Unit tests** for the pure parts: symbol path parsing, code normalization, buffer state machine, result truncation.
 - **Golden scripts**: each worked example from the tool description runs as a test, so the documentation can never silently rot.
+- **Eval suite** (post-v1 gate, see Build Plan phase 6): ~15 benchmark tasks (`scripts/eval.ts`) where a real LLM is given only the tool description and a task ("rename X and report affected files", "find unused exports", "extract this function to a new module") against the fixture project, scored pass/fail. This is how Success Criterion #4 (>90% correct codegen) becomes measurable: every change to the tool description, type defs, or error messages moves a number instead of vibes. Run on demand, not in CI (it costs tokens and needs an API key).
 
 ## Build Plan
 
 1. **LSP client core** — spawn, handshake, warmup, `documentSymbol`. Exit: integration test gets a symbol tree from the fixture project.
 2. **Symbol resolution + read API** — `symbol.ts`, all 8 read ops. Exit: read ops pass integration tests incl. error-message format.
-3. **Sandbox + MCP wiring** — `sandbox.ts`, `mcp-server.ts`, execute tool with read-only API. Exit: an MCP client can explore the fixture project end-to-end.
-4. **Transactional writes** — `buffer.ts`, 7 write ops, diagnostics collection, rollback. Exit: failed scripts leave disk byte-identical; rename fan-out works.
-5. **Polish** — type-def generation build step, tool description with examples/warnings, crash-recovery test, result truncation, README.
+3. **Sandbox + MCP wiring** — `sandbox.ts`, `mcp-server.ts`, execute tool with read-only API, operation trace recording. Exit: an MCP client can explore the fixture project end-to-end; a failing script's result includes the trace.
+4. **Transactional writes** — `buffer.ts`, 7 write ops, diagnostics collection, rollback, `changes` diffs in the execute result, `CODEMODE_READONLY` gate. Exit: failed scripts leave disk byte-identical; rename fan-out works; a successful write script returns reviewable diffs.
+5. **Polish** — type-def generation build step, tool description with examples/warnings, crash-recovery test, result truncation, README with a copy-paste `.mcp.json` snippet.
+6. **Eval & distribution** — `scripts/eval.ts` benchmark suite (see Testing); publish so `bunx codemode-lsp` works from a clean machine. Exit: eval pass rate is measured and reported in the README; a stranger can install and run it from the README alone.
 
 Each phase lands with its tests. Phase 3 produces a usable (read-only) server — dogfood it from that point on.
 
@@ -301,7 +318,9 @@ Each phase lands with its tests. Phase 3 produces a usable (read-only) server �
 | --- | --- |
 | Multi-language support | Architecture ready (lsp-manager extraction); v1 = TypeScript done well |
 | `codeAction` (auto-import, organize imports) | Valuable but complex; scripts can write imports manually |
-| `implementation`, `hover`, call/type hierarchy | `findReferences`/`getSymbolBody`/`signature` cover most cases |
+| `implementation`, `hover`, call/type hierarchy | `findReferences`/`getSymbolBody`/`signature` cover most cases. `hover` (as `lsp.getType`) is the first candidate to pull forward — but only if the eval suite shows scripts stumbling on inferred types, not on speculation |
+| Semantic search (embedding index) | Real gap — `findSymbol`/`searchText` are lexical — but it's chunky infra (indexing, invalidation on writes) deserving its own design. Deterministic at query time, so it doesn't violate the no-AI-inside rule |
+| AI/LLM calls inside the server | Breaks determinism (rollback safety, testability, reproducible retries) and blurs who self-corrects. Litmus test: anything the calling LLM can do with the primitives stays in the caller. If a smart op ever justifies itself, use MCP **sampling** (server requests a completion from the client's own model — no API key, client controls it) |
 | Shell command execution | Out of scope; MCP clients have their own shell tools |
 | Human approval workflow | MCP-client concern, not server concern |
 | Config file / multi-root | Premature with two env vars to configure |
@@ -336,6 +355,18 @@ Contradictions between the working docs, resolved here:
 - **No `lsp-manager.ts`** (VISION) — old PRD's module list was stale.
 - **Symbol ambiguity throws** with a candidate list — "return candidates" in the old PRD was underspecified; throwing keeps every API's success type clean.
 - **New in this spec** (no prior doc covered them): path containment (reject paths outside workspace root), result truncation at 50k chars, per-LSP-request 10s timeout, env-var configuration, file create/delete buffer states, testing strategy, build plan.
+
+### Usefulness review additions (post-Phase-1, pre-Phase-2)
+
+Five additions from a usefulness review, all preserving the "deterministic hands, smart caller" split:
+
+- **`changes` diffs in the execute result** (§ The execute Tool, Build Plan phase 4) — the buffer already holds original + final content, so unified diffs at flush are nearly free and make every write reviewable.
+- **Operation trace on script failure** (§ Errors, Build Plan phase 3) — record each `lsp.*` call; on failure return where the script died and what had completed, so the rewritten script resumes reasoning instead of rediscovering state.
+- **`CODEMODE_READONLY`** (§ Configuration, Build Plan phase 4) — strips write ops from sandbox, type defs, and tool description.
+- **Eval suite** (§ Testing, new Build Plan phase 6) — makes Success Criterion #4 measurable; gates pulling deferred APIs (e.g. `hover`) forward on evidence.
+- **Distribution** (Build Plan phases 5–6) — `bunx codemode-lsp` + copy-paste `.mcp.json` in the README.
+
+Also recorded: **no AI inside the server** (deferred table) — the litmus test is "can the calling LLM do this with the primitives?"; MCP sampling is the escape hatch if a smart op ever justifies itself.
 
 ### Phase 1 implementation decisions (spec silent or contradicted by reality)
 
