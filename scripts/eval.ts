@@ -11,9 +11,9 @@
  * are disabled and only the MCP execute tool is allowed, so the agent cannot
  * route around the API under test. Run on demand, not in CI:
  *
- *   bun run eval                 # all 15 tasks
+ *   bun run eval                 # all 15 tasks (on sonnet)
  *   bun run eval --task rename-finduser
- *   bun run eval --model claude-haiku-4-5
+ *   bun run eval --model opus
  */
 import { spawnSync } from "node:child_process";
 import { join } from "node:path";
@@ -27,6 +27,12 @@ import {
 
 const repoRoot = join(import.meta.dir, "..");
 const serverEntry = join(repoRoot, "src", "index.ts");
+
+/**
+ * Default eval model. Pinned (rather than inheriting the user's Claude Code
+ * default) so pass rates are comparable across runs; override with --model.
+ */
+const DEFAULT_MODEL = "sonnet";
 
 /** Built-in Claude Code tools the agent must not use to solve the task. */
 const DISALLOWED_TOOLS = [
@@ -58,7 +64,7 @@ interface AgentRun {
   error?: string;
 }
 
-function runAgent(task: EvalTask, dir: string, model?: string): AgentRun {
+function runAgent(task: EvalTask, dir: string, model: string): AgentRun {
   const mcpConfig = JSON.stringify({
     mcpServers: {
       codemode: {
@@ -82,8 +88,9 @@ function runAgent(task: EvalTask, dir: string, model?: string): AgentRun {
     "json",
     "--max-turns",
     "16",
+    "--model",
+    model,
   ];
-  if (model) args.push("--model", model);
 
   const started = Date.now();
   const proc = spawnSync("claude", args, {
@@ -148,7 +155,7 @@ function parseArgs(argv: string[]): { taskIds: string[]; model?: string } {
 }
 
 function main(): void {
-  const { taskIds, model } = parseArgs(process.argv.slice(2));
+  const { taskIds, model = DEFAULT_MODEL } = parseArgs(process.argv.slice(2));
 
   if (spawnSync("claude", ["--version"], { encoding: "utf8" }).error) {
     console.error(
@@ -200,7 +207,7 @@ function main(): void {
     console.log(
       "\nREADME snippet:\n" +
         `Eval pass rate: **${passed}/${outcomes.length} (${rate}%)** — ` +
-        `headless Claude Code${model ? ` (${model})` : ""}, ${date}.`,
+        `headless Claude Code (${model}), ${date}.`,
     );
   }
   process.exit(passed === outcomes.length ? 0 : 1);

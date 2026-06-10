@@ -106,6 +106,8 @@ only the tool description, write correct scripts? It runs 15 benchmark tasks
 against a throwaway copy of the fixture project. The agent is headless Claude
 Code (`claude -p`, billed to your Claude subscription — no API key) with every
 built-in tool disabled, so the only way to solve a task is the `execute` tool.
+It runs on Sonnet by default (pinned so pass rates are comparable);
+`--model opus` etc. overrides.
 Grading is deterministic: read tasks are scored on the final answer, write
 tasks on the resulting disk state.
 
