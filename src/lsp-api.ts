@@ -298,7 +298,7 @@ export class LspApi {
   }
 
   async findSymbol(query: string): Promise<WorkspaceSymbolInfo[]> {
-    const symbols = await this.client.workspaceSymbol(query);
+    const symbols = await this.workspaceSymbolWithIndexWait(query);
     const mapped: WorkspaceSymbolInfo[] = [];
     for (const symbol of symbols) {
       const location = symbolInformationLocation(symbol);
@@ -396,8 +396,11 @@ export class LspApi {
       for (let lineIndex = 0; lineIndex < lines.length; lineIndex += 1) {
         const line = lines[lineIndex] ?? "";
         regex.lastIndex = 0;
-        let match: RegExpExecArray | null;
-        while ((match = regex.exec(line)) !== null) {
+        for (
+          let match = regex.exec(line);
+          match !== null;
+          match = regex.exec(line)
+        ) {
           results.push({
             file,
             line: lineIndex + 1,
@@ -451,6 +454,26 @@ export class LspApi {
           this.client.getDiagnosticsForUris([uri]),
         ),
       );
+  }
+
+  /**
+   * `workspace/symbol` returns an empty list until tsserver finishes building
+   * its project-wide symbol index, which happens lazily a few hundred ms after
+   * the project loads (PRD Risk #2: cold-start incompleteness). Poll briefly on
+   * an empty result so the first cross-file query is not silently empty; a query
+   * that is genuinely empty just pays the bounded wait once.
+   */
+  private async workspaceSymbolWithIndexWait(
+    query: string,
+    timeoutMs = 3_000,
+  ): Promise<Array<SymbolInformation | WorkspaceSymbol>> {
+    const started = Date.now();
+    let symbols = await this.client.workspaceSymbol(query);
+    while (symbols.length === 0 && Date.now() - started < timeoutMs) {
+      await new Promise((resolve) => setTimeout(resolve, 150));
+      symbols = await this.client.workspaceSymbol(query);
+    }
+    return symbols;
   }
 
   private async documentSymbols(
@@ -536,7 +559,10 @@ export class LspApi {
     return diagnostics.map((diagnostic) => ({
       file: workspacePath.relPath,
       range: diagnostic.range,
-      message: diagnostic.message,
+      message:
+        typeof diagnostic.message === "string"
+          ? diagnostic.message
+          : diagnostic.message.value,
       severity: severityName(diagnostic.severity),
     }));
   }

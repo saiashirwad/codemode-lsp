@@ -3,6 +3,7 @@ import { type Dirent, readdirSync, readFileSync } from "node:fs";
 import { isAbsolute, join } from "node:path";
 import { pathToFileURL } from "node:url";
 import {
+  CancellationReceiverStrategy,
   type CancellationToken,
   CancellationTokenSource,
   type MessageConnection,
@@ -342,6 +343,13 @@ export class LspClient {
       throw new Error("Failed to open language-server stdio streams");
     }
     this.proc = proc;
+    // Once the process is killed during teardown, stdin is destroyed. A pending
+    // request cancellation (`$/cancelRequest`, sent when a request times out)
+    // can still race a write onto the dead stream — that surfaces as an
+    // unhandled ERR_STREAM_DESTROYED. Absorb it: teardown is already underway.
+    proc.stdin?.on("error", () => {
+      // Stream write after destroy during teardown; nothing to recover.
+    });
     proc.stderr?.on("data", (chunk: Buffer | string) => {
       this.appendStderr(String(chunk));
     });
@@ -356,9 +364,37 @@ export class LspClient {
       });
     });
 
+    // Wait until the OS confirms the process actually started before writing
+    // any LSP message. A bad CODEMODE_LSP_BIN emits `error` (ENOENT) with stdio
+    // streams that are already being torn down; writing `initialize` into them
+    // races a destroyed stdin and leaks an unhandled ERR_STREAM_DESTROYED.
+    // Gating on `spawn` vs `error` makes the failure path purely the spawn error.
+    await Promise.race([
+      new Promise<void>((resolve) => proc.once("spawn", resolve)),
+      spawnErrorPromise,
+    ]);
+
     const connection = createMessageConnection(
       new StreamMessageReader(proc.stdout),
       new StreamMessageWriter(proc.stdin),
+      undefined,
+      {
+        // Default cancellation sends `$/cancelRequest` and ignores the returned
+        // promise. When a request times out and we tear the server down, that
+        // notification can race a write onto a destroyed stdin, surfacing as an
+        // unhandled ERR_STREAM_DESTROYED. Swallow the write failure: the request
+        // is already being cancelled/torn down.
+        cancellationStrategy: {
+          receiver: CancellationReceiverStrategy.Message,
+          sender: {
+            sendCancellation: (conn, id) =>
+              conn.sendNotification("$/cancelRequest", { id }).catch(() => {
+                // Stream gone during teardown; cancellation is moot.
+              }),
+            cleanup: () => {},
+          },
+        },
+      },
     );
     connection.onClose(() => {
       if (this.connection === connection) this.markDead(false);
@@ -390,10 +426,18 @@ export class LspClient {
     // down so isAlive() reports dead and the next ensureAlive() retries —
     // otherwise a wedged-but-running server would be reported healthy forever.
     try {
-      await Promise.race([
-        this.request<InitializeResult>("initialize", this.initializeParams()),
-        spawnErrorPromise,
-      ]);
+      // If the spawn-error promise wins the race, the abandoned initialize
+      // request still settles later. On a bad binary, its write rejects with
+      // ERR_STREAM_DESTROYED once stdin is gone — attach a no-op catch so that
+      // loser rejection is handled rather than surfacing as an unhandled one.
+      const initializeRequest = this.request<InitializeResult>(
+        "initialize",
+        this.initializeParams(),
+      );
+      initializeRequest.catch(() => {
+        // Handled by the race below (or abandoned on spawn error/teardown).
+      });
+      await Promise.race([initializeRequest, spawnErrorPromise]);
       connection.sendNotification("initialized", {});
     } catch (error) {
       this.teardownProcess();
@@ -414,6 +458,10 @@ export class LspClient {
           documentSymbol: { hierarchicalDocumentSymbolSupport: true },
           definition: { linkSupport: false },
           references: {},
+          // typescript-language-server 4.x only pushes textDocument/
+          // publishDiagnostics when the client advertises support for it.
+          // Without this, getDiagnostics never sees the fixture's type error.
+          publishDiagnostics: {},
         },
         workspace: {
           symbol: {},

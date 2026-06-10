@@ -53,12 +53,18 @@ describe("workspace symbol ambiguity", () => {
         workspaceSymbol({
           name: "duplicate",
           kind: SymbolKind.Function,
+          // 0-based line 38 = `export function createAuthMiddleware` (line 39),
+          // an exported declaration, so the line-based export heuristic reports
+          // exported: true (PRD § Phase 2: exported is inferred from the
+          // declaration line).
           file: join(fixture.dir, "src", "auth.ts"),
-          line: 36,
+          line: 38,
         }),
         workspaceSymbol({
           name: "duplicate",
           kind: SymbolKind.Variable,
+          // 0-based line 8 = `const registry` (line 9), a non-exported
+          // declaration, so the heuristic reports exported: false.
           file: join(fixture.dir, "src", "users.ts"),
           line: 8,
         }),

@@ -197,12 +197,43 @@ export function parseSymbolPath(input: string): ParsedSymbolSegment[] {
   });
 }
 
+/**
+ * Whether a DocumentSymbol name can serve as a slash/dot symbol-path segment.
+ *
+ * `typescript-language-server` emits anonymous-callback symbols with synthetic
+ * names like `registry.find() callback` (dots, parens, spaces). These are not
+ * addressable: the dot-alias normalization (`.` → `/`) mangles the name, so the
+ * path can never round-trip through getSymbolBody/findReferences/etc. They are
+ * also not meaningful edit targets. We drop them from getSymbols output so every
+ * returned SymbolInfo.path resolves. See PRD § Phase 2 implementation decisions.
+ */
+function isAddressableSymbolName(name: string): boolean {
+  // Reject characters that conflict with path syntax (`/`, `.`) or that mark a
+  // synthetic tsserver symbol: parens/spaces (`registry.find() callback`) and
+  // angle brackets (`<function>` for anonymous function expressions).
+  return name.length > 0 && !/[./()<>\s]/.test(name);
+}
+
+function addressableSymbols(symbols: DocumentSymbol[]): DocumentSymbol[] {
+  const filtered: DocumentSymbol[] = [];
+  for (const symbol of symbols) {
+    if (!isAddressableSymbolName(symbol.name)) continue;
+    filtered.push(
+      symbol.children
+        ? { ...symbol, children: addressableSymbols(symbol.children) }
+        : symbol,
+    );
+  }
+  return filtered;
+}
+
 export function buildSymbolInfoTree(
   symbols: DocumentSymbol[],
   sourceText?: string,
 ): SymbolInfo[] {
-  return symbols.map((symbol, index) =>
-    toInfo(symbol, symbols, index, "", sourceText),
+  const addressable = addressableSymbols(symbols);
+  return addressable.map((symbol, index) =>
+    toInfo(symbol, addressable, index, "", sourceText),
   );
 }
 
@@ -284,7 +315,10 @@ export function containingSymbolPath(
     }
     return undefined;
   }
-  return visit(buildResolvedSymbolTree(symbols))?.path;
+  // Walk the addressable tree only: un-addressable nodes (anonymous callbacks,
+  // `<function>`) and their subtrees are pruned, so the containing handle is the
+  // nearest *reusable* symbol path — never a synthetic inner name.
+  return visit(buildResolvedSymbolTree(addressableSymbols(symbols)))?.path;
 }
 
 export function symbolPathForRange(
@@ -298,5 +332,5 @@ export function symbolPathForRange(
     }
     return undefined;
   }
-  return visit(buildResolvedSymbolTree(symbols))?.path;
+  return visit(buildResolvedSymbolTree(addressableSymbols(symbols)))?.path;
 }
