@@ -49,6 +49,16 @@ describe("execute tool via the MCP SDK (integration)", () => {
   });
 
   test(
+    "lsp.help() returns the full tool description from inside a script",
+    async () => {
+      const { tools } = await client.listTools();
+      const payload = await execute("await lsp.help()");
+      expect(JSON.parse(payload.result)).toBe(tools[0]?.description);
+    },
+    { timeout: 30_000 },
+  );
+
+  test(
     "an MCP client can explore the fixture project end-to-end",
     async () => {
       const payload = await execute(

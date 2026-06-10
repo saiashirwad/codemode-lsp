@@ -15,6 +15,7 @@ import {
   LSP_WRITE_INTERFACES,
   LSP_WRITE_OP_SIGNATURES,
 } from "./lsp-types.generated";
+import { READ_OP_NAMES, WRITE_OP_NAMES } from "./sandbox";
 
 export interface WorkedExample {
   title: string;
@@ -78,13 +79,17 @@ export function renderLspTypes(readonly: boolean): string {
   const interfaces = readonly
     ? LSP_COMMON_INTERFACES
     : `${LSP_COMMON_INTERFACES}\n\n${LSP_WRITE_INTERFACES}`;
+  const helpOp =
+    "  /** This full API reference as a string — call it if this description was truncated. */\n  help(): Promise<string>;";
   const ops = readonly
-    ? LSP_READ_OP_SIGNATURES
-    : `${LSP_READ_OP_SIGNATURES}\n\n  // Write operations — buffered, applied atomically when the script succeeds.\n${LSP_WRITE_OP_SIGNATURES}`;
+    ? `${LSP_READ_OP_SIGNATURES}\n\n${helpOp}`
+    : `${LSP_READ_OP_SIGNATURES}\n\n  // Write operations — buffered, applied atomically when the script succeeds.\n${LSP_WRITE_OP_SIGNATURES}\n\n${helpOp}`;
   return `declare const lsp: {\n${ops}\n};\n\n${interfaces}`;
 }
 
 const TEMPLATE = `Execute JavaScript to perform semantic code operations via LSP (TypeScript).
+If this description looks truncated, run the script \`await lsp.help()\` — it
+returns this complete reference. Ops — {{opInventory}}.
 
 Write one script that chains lsp.* calls — filter, loop, and branch in code
 instead of across many tool calls. The sandbox provides \`lsp\`,
@@ -114,6 +119,10 @@ script's last expression, JSON-serialized.
   the write ops.
 - \`searchText\` patterns are regexes — escape metacharacters for literal text:
   \`searchText("new NotFoundError\\\\(")\`.
+- \`goToDefinition\` only addresses symbols DEFINED in the given file — it cannot
+  follow an imported or called name into another module. To resolve a name to
+  its definition anywhere in the workspace, use \`findSymbol(name)\` and filter
+  for an exact \`name\` match (it also returns substring matches).
 - File paths are relative to the workspace root; anything outside it is
   rejected.
 - Diagnostics cover files touched this session only, never the whole project.
@@ -148,7 +157,13 @@ export function buildToolDescription(readonly: boolean): string {
         `### ${example.title}\n\`\`\`javascript\n${example.code}\n\`\`\``,
     )
     .join("\n\n");
-  return TEMPLATE.replace("{{types}}", renderLspTypes(readonly))
+  // The inventory sits in the first lines so even a brutally truncated
+  // description still names every operation (signatures follow under ## API).
+  const opInventory = readonly
+    ? `read: ${READ_OP_NAMES.join(", ")}`
+    : `read: ${READ_OP_NAMES.join(", ")}; write: ${WRITE_OP_NAMES.join(", ")}`;
+  return TEMPLATE.replace("{{opInventory}}", opInventory)
+    .replace("{{types}}", renderLspTypes(readonly))
     .replace(
       "{{writeSemantics}}",
       readonly ? READONLY_SEMANTICS : WRITE_SEMANTICS,

@@ -475,7 +475,7 @@ export class LspApi {
     return buildSymbolInfoTree(await this.documentSymbols(resolved), text);
   }
 
-  /** Workspace-wide symbol search; the index warms lazily, so early calls may be empty — getSymbols(file) is exhaustive. */
+  /** Workspace-wide symbol search; matches substrings, so filter for exact `name`. The index warms lazily — early calls may be empty; getSymbols(file) is exhaustive. */
   async findSymbol(query: string): Promise<WorkspaceSymbolInfo[]> {
     this.requireStrings(
       "findSymbol(query)",
@@ -551,7 +551,7 @@ export class LspApi {
     return references;
   }
 
-  /** Jump to a symbol's definition. */
+  /** Jump to the definition of a symbol DEFINED in `file` — imports/callees in a body are not addressable; resolve those names with findSymbol. */
   async goToDefinition(file: string, symbolPath: string): Promise<Location> {
     this.requireStrings(
       "goToDefinition(file, symbolPath)",

@@ -72,7 +72,10 @@ The API surface is 16 functions plus `getDiagnostics`: 8 read ops (`readFile`,
 `deleteSymbol`, `writeFile`, `deleteFile`). Symbols are addressed by
 slash-separated paths (`MyClass/myMethod`) discovered via `getSymbols`. The
 full type definitions are embedded in the tool description, generated straight
-from the source (`bun run generate:types`).
+from the source (`bun run generate:types`). If a client truncates the
+description, the script `await lsp.help()` returns the complete reference —
+the description's first lines advertise this, so an agent can always recover
+the full API without probing.
 
 See `PRD.md` for the complete spec.
 

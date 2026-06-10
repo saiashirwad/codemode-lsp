@@ -4,7 +4,7 @@ import {
   generatedPath,
   generateTypesModuleSource,
 } from "../../scripts/generate-types";
-import { WRITE_OP_NAMES } from "../../src/sandbox";
+import { READ_OP_NAMES, WRITE_OP_NAMES } from "../../src/sandbox";
 import {
   buildToolDescription,
   renderLspTypes,
@@ -42,6 +42,12 @@ describe("generated type definitions", () => {
     }
     expect(types).not.toContain("WriteResult");
   });
+
+  test("both modes expose the help() escape hatch", () => {
+    for (const readonly of [false, true]) {
+      expect(renderLspTypes(readonly)).toContain("help(): Promise<string>;");
+    }
+  });
 });
 
 describe("tool description", () => {
@@ -73,6 +79,25 @@ describe("tool description", () => {
     expect(rules).toBeLessThan(signatures);
     expect(signatures).toBeLessThan(interfaces);
     expect(interfaces).toBeLessThan(examples);
+  });
+
+  test("the head names every op and the lsp.help() escape hatch", () => {
+    // Clients truncate long descriptions at arbitrary points; whatever survives
+    // must include the full op inventory and the way to recover the rest.
+    for (const readonly of [false, true]) {
+      const head = buildToolDescription(readonly).slice(0, 450);
+      expect(head).toContain("await lsp.help()");
+      for (const op of READ_OP_NAMES) {
+        expect(head).toContain(op);
+      }
+      for (const op of WRITE_OP_NAMES) {
+        if (readonly) {
+          expect(head).not.toContain(op);
+        } else {
+          expect(head).toContain(op);
+        }
+      }
+    }
   });
 
   test("full mode includes every worked example; readonly only read examples", () => {

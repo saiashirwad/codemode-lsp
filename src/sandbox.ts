@@ -66,6 +66,12 @@ export interface SandboxOptions {
    * (CODEMODE_READONLY). Read ops + getDiagnostics remain. Defaults to false.
    */
   readonly?: boolean;
+  /**
+   * Full API reference returned by `lsp.help()` — the escape hatch for clients
+   * that truncate the tool description (a field report showed an agent burning
+   * a whole invocation probing signatures it should have been handed).
+   */
+  helpText?: string;
 }
 
 /** Read ops + getDiagnostics — always exposed, even under CODEMODE_READONLY. */
@@ -524,6 +530,14 @@ export async function runSandbox(
     makeSandboxError,
     wrapAsync,
     opNames,
+  );
+  // Untraced meta-op: the full API reference, for when the client truncated
+  // the tool description.
+  const helpText =
+    options.helpText ??
+    "No extended help is available; the tool description is the full reference.";
+  (sandbox.lsp as Record<string, unknown>).help = wrapAsync(
+    async () => helpText,
   );
 
   const { source, uncapturedLastStatement } = normalizeCode(code);

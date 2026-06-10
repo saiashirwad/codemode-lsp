@@ -243,6 +243,21 @@ describe("uncaptured-last-statement hint", () => {
   });
 });
 
+describe("lsp.help", () => {
+  test("returns the configured help text (auto-awaited like any lsp.* call)", async () => {
+    const { result } = await runSandbox("lsp.help()", {
+      lsp: stubApi(),
+      helpText: "FULL API REFERENCE",
+    });
+    expect(JSON.parse(result)).toBe("FULL API REFERENCE");
+  });
+
+  test("falls back to a self-describing message when unconfigured", async () => {
+    const { result } = await runSandbox("await lsp.help()", { lsp: stubApi() });
+    expect(JSON.parse(result)).toContain("tool description");
+  });
+});
+
 describe("timeout", () => {
   test("an async-hanging script fails with a timeout error", async () => {
     await expect(

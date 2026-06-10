@@ -66,6 +66,8 @@ export interface ExecuteToolDeps {
   rootDir?: string;
   /** When true, write ops are stripped from the sandbox (CODEMODE_READONLY). */
   readonly?: boolean;
+  /** Full API reference served by `lsp.help()` (defaults to the tool description). */
+  helpText?: string;
 }
 
 /**
@@ -103,6 +105,8 @@ export function createExecuteRunner(deps: ExecuteToolDeps): {
           lsp: deps.api,
           timeoutMs: deps.timeoutMs,
           readonly: deps.readonly,
+          helpText:
+            deps.helpText ?? buildToolDescription(deps.readonly ?? false),
         });
         // Success → flush buffered writes to disk, producing reviewable diffs.
         const flushed = buffer.flush();
@@ -209,6 +213,7 @@ export function createServer(options: CreateServerOptions = {}): CreatedServer {
   // spawn failure is normalized into the { result, logs, changes } payload there.
   warmup.catch(() => undefined);
 
+  const description = buildToolDescription(readonly);
   const { execute } = createExecuteRunner({
     api,
     client,
@@ -216,6 +221,7 @@ export function createServer(options: CreateServerOptions = {}): CreatedServer {
     warmup,
     rootDir,
     readonly,
+    helpText: description,
   });
 
   const server = new McpServer({
@@ -226,7 +232,7 @@ export function createServer(options: CreateServerOptions = {}): CreatedServer {
   server.registerTool(
     "execute",
     {
-      description: buildToolDescription(readonly),
+      description,
       inputSchema: {
         code: z
           .string()
