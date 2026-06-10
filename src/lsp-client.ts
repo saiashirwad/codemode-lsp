@@ -15,6 +15,9 @@ import {
   StreamMessageWriter,
 } from "vscode-jsonrpc/node";
 import type {
+  CallHierarchyIncomingCall,
+  CallHierarchyItem,
+  CallHierarchyOutgoingCall,
   Definition,
   Diagnostic,
   DocumentSymbol,
@@ -280,6 +283,40 @@ export class LspClient {
       { textDocument: { uri: params.uri }, position: params.position },
     );
     return normalizeDefinition(result);
+  }
+
+  /** Resolve the call-hierarchy item at a position (empty when not callable). */
+  async prepareCallHierarchy(
+    params: UriPosition,
+  ): Promise<CallHierarchyItem[]> {
+    await this.ensureAlive();
+    const result = await this.request<CallHierarchyItem[] | null>(
+      "textDocument/prepareCallHierarchy",
+      { textDocument: { uri: params.uri }, position: params.position },
+    );
+    return result ?? [];
+  }
+
+  async incomingCalls(
+    item: CallHierarchyItem,
+  ): Promise<CallHierarchyIncomingCall[]> {
+    await this.ensureAlive();
+    const result = await this.request<CallHierarchyIncomingCall[] | null>(
+      "callHierarchy/incomingCalls",
+      { item },
+    );
+    return result ?? [];
+  }
+
+  async outgoingCalls(
+    item: CallHierarchyItem,
+  ): Promise<CallHierarchyOutgoingCall[]> {
+    await this.ensureAlive();
+    const result = await this.request<CallHierarchyOutgoingCall[] | null>(
+      "callHierarchy/outgoingCalls",
+      { item },
+    );
+    return result ?? [];
   }
 
   openTextDocument(abs: string): void {
@@ -572,6 +609,7 @@ export class LspClient {
           definition: { linkSupport: false },
           references: {},
           rename: { prepareSupport: true },
+          callHierarchy: {},
           synchronization: { didSave: false, willSave: false },
           // typescript-language-server 4.x only pushes textDocument/
           // publishDiagnostics when the client advertises support for it.

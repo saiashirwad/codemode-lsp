@@ -325,6 +325,39 @@ export function containingSymbolPath(
   return visit(buildResolvedSymbolTree(addressableSymbols(symbols)))?.path;
 }
 
+const CALLABLE_KIND_NAMES = new Set(["function", "method", "constructor"]);
+
+/**
+ * The nearest enclosing FUNCTION-LIKE symbol path (function, method,
+ * constructor) for a position, falling back to the deepest containing symbol
+ * when nothing function-like encloses it. Field report: a call inside
+ * `const result = await recordInvoicePayment(...)` was attributed to the local
+ * `result` binding instead of its containing function — callers asking "which
+ * function is this reference in?" want the function, not the nearest binding.
+ */
+export function containingFunctionPath(
+  symbols: DocumentSymbol[],
+  position: Position,
+): string | undefined {
+  const chain: ResolvedSymbol[] = [];
+  function visit(candidates: ResolvedSymbol[]): void {
+    for (const candidate of candidates) {
+      if (!positionContains(candidate.range, position)) continue;
+      chain.push(candidate);
+      visit(candidate.children);
+      return;
+    }
+  }
+  visit(buildResolvedSymbolTree(addressableSymbols(symbols)));
+  for (let i = chain.length - 1; i >= 0; i -= 1) {
+    const candidate = chain[i];
+    if (candidate && CALLABLE_KIND_NAMES.has(candidate.kind)) {
+      return candidate.path;
+    }
+  }
+  return chain[chain.length - 1]?.path;
+}
+
 export function symbolPathForRange(
   symbols: DocumentSymbol[],
   range: Range,

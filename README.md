@@ -65,11 +65,14 @@ returns `{ result, logs, changes }`:
 - **changes** — every file that hit disk, as `{ file, kind, diff }` with a
   unified diff against the pre-script content. Empty for read-only scripts.
 
-The API surface is 16 functions plus `getDiagnostics`: 8 read ops (`readFile`,
+The API surface is 18 functions plus `getDiagnostics`: 10 read ops (`readFile`,
 `getSymbolBody`, `getSymbols`, `findSymbol`, `findReferences`,
-`goToDefinition`, `searchText`, `listFiles`) and 7 write ops (`renameSymbol`,
-`replaceSymbolBody`, `insertBeforeSymbol`, `insertAfterSymbol`,
-`deleteSymbol`, `writeFile`, `deleteFile`). Symbols are addressed by
+`goToDefinition`, `incomingCalls`, `outgoingCalls`, `searchText`, `listFiles`)
+and 7 write ops (`renameSymbol`, `replaceSymbolBody`, `insertBeforeSymbol`,
+`insertAfterSymbol`, `deleteSymbol`, `writeFile`, `deleteFile`). The call
+hierarchy ops return only true calls — attributed to the enclosing function,
+resolved across modules — where `findReferences` mixes calls with imports and
+re-exports. Symbols are addressed by
 slash-separated paths (`MyClass/myMethod`) discovered via `getSymbols`. The
 full type definitions are embedded in the tool description, generated straight
 from the source (`bun run generate:types`). If a client truncates the

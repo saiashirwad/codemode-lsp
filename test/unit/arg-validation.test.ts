@@ -63,4 +63,17 @@ describe("lsp.* argument validation", () => {
       /searchText\(pattern, glob\?\).*"pattern"/s,
     );
   });
+
+  test("incomingCalls with a missing symbolPath names the signature", async () => {
+    // @ts-expect-error deliberate wrong arity
+    await expect(api.incomingCalls("src/auth.ts")).rejects.toThrow(
+      /incomingCalls\(file, symbolPath\).*"symbolPath".*missing argument/s,
+    );
+  });
+
+  test("outgoingCalls rejects a non-string file", async () => {
+    await expect(
+      api.outgoingCalls(7 as unknown as string, "recordPayment"),
+    ).rejects.toThrow(/outgoingCalls\(file, symbolPath\).*"file".*a number/s);
+  });
 });

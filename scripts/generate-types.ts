@@ -29,6 +29,8 @@ const COMMON_INTERFACE_NAMES = [
   "SymbolInfo",
   "WorkspaceSymbolInfo",
   "Reference",
+  "CallInfo",
+  "CallSite",
   "Location",
   "SearchResult",
   "Diagnostic",

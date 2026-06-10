@@ -82,6 +82,8 @@ export const READ_OP_NAMES = [
   "findSymbol",
   "findReferences",
   "goToDefinition",
+  "incomingCalls",
+  "outgoingCalls",
   "searchText",
   "listFiles",
   "getDiagnostics",

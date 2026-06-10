@@ -8,6 +8,7 @@ import {
 import { dirname, isAbsolute, relative, resolve, sep } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import type {
+  CallHierarchyItem,
   DocumentSymbol,
   Diagnostic as LspDiagnostic,
   Location as LspLocation,
@@ -22,7 +23,7 @@ import { isLspDocumentPath, TransactionalBuffer } from "./buffer";
 import type { LspClient } from "./lsp-client";
 import {
   buildSymbolInfoTree,
-  containingSymbolPath,
+  containingFunctionPath,
   isDocumentSymbolArray,
   resolveSymbolPath,
   type SymbolInfo,
@@ -40,10 +41,32 @@ export interface Reference {
   column: number;
   /** The actual line of code containing the reference. */
   context: string;
-  /** Path of the symbol containing the reference (a reusable handle); "" at top level. */
+  /** Path of the nearest enclosing function/method (a reusable handle); "" at top level. */
   symbolPath: string;
   /** Always false in v1 — the language server does not classify accesses. */
   isWriteAccess: boolean;
+}
+
+/** One exact call site (a true call — never an import, re-export, or type reference). */
+export interface CallSite {
+  /** 1-based. */
+  line: number;
+  /** 1-based. */
+  column: number;
+  /** The line of code containing the call. */
+  context: string;
+}
+
+/** One edge of the call graph, from incomingCalls/outgoingCalls. */
+export interface CallInfo {
+  /** The other function: the caller (incomingCalls) or the callee (outgoingCalls). */
+  file: string;
+  /** Its symbol path — round-trips into other lsp.* calls together with `file`. */
+  symbolPath: string;
+  name: string;
+  kind: string;
+  /** Call sites in the caller's body (so in `file` for incomingCalls, in the queried symbol's file for outgoingCalls). */
+  callSites: CallSite[];
 }
 
 export interface Location {
@@ -575,6 +598,126 @@ export class LspApi {
       );
     }
     return this.locationToApiLocation(first);
+  }
+
+  /** Functions that CALL this symbol — true calls only (no imports/re-exports), each attributed to its enclosing function with exact call sites. */
+  async incomingCalls(file: string, symbolPath: string): Promise<CallInfo[]> {
+    const item = await this.callHierarchyItemFor(
+      "incomingCalls(file, symbolPath)",
+      'await lsp.incomingCalls("src/auth.ts", "AuthService/validate")',
+      file,
+      symbolPath,
+    );
+    const calls = await this.client.incomingCalls(item);
+    const results: CallInfo[] = [];
+    for (const call of calls) {
+      // Incoming call sites live in the CALLER's file.
+      const info = await this.callHierarchyItemToInfo(
+        call.from,
+        call.fromRanges,
+        call.from.uri,
+      );
+      if (info) results.push(info);
+    }
+    return results;
+  }
+
+  /** Functions this symbol's body CALLS, each resolved to its definition (follows imports across modules); workspace functions only — library calls are omitted. */
+  async outgoingCalls(file: string, symbolPath: string): Promise<CallInfo[]> {
+    const item = await this.callHierarchyItemFor(
+      "outgoingCalls(file, symbolPath)",
+      'await lsp.outgoingCalls("src/payments.ts", "recordPayment")',
+      file,
+      symbolPath,
+    );
+    const calls = await this.client.outgoingCalls(item);
+    const results: CallInfo[] = [];
+    for (const call of calls) {
+      // Outgoing call sites live in the QUERIED symbol's own body.
+      const info = await this.callHierarchyItemToInfo(
+        call.to,
+        call.fromRanges,
+        item.uri,
+      );
+      if (info) results.push(info);
+    }
+    return results;
+  }
+
+  /** Resolve (file, symbolPath) to the LSP call-hierarchy item, or throw an LLM-targeted error. */
+  private async callHierarchyItemFor(
+    signature: string,
+    example: string,
+    file: string,
+    symbolPath: string,
+  ): Promise<CallHierarchyItem> {
+    this.requireStrings(signature, example, { file, symbolPath });
+    const resolved = this.resolveWorkspacePath(file);
+    const symbol = resolveSymbolPath({
+      file: resolved.relPath,
+      symbolPath,
+      symbols: await this.documentSymbols(resolved),
+    });
+    const items = await this.client.prepareCallHierarchy({
+      uri: resolved.uri,
+      position: symbol.selectionRange.start,
+    });
+    const item = items[0];
+    if (!item) {
+      throw new Error(
+        `"${symbolPath}" in "${resolved.relPath}" has no call hierarchy — the symbol must be callable (a function, method, or constructor; its kind is "${symbol.kind}"). Pick a function-like symbol from getSymbols("${resolved.relPath}").`,
+      );
+    }
+    return item;
+  }
+
+  /**
+   * Map one side of a call edge to a CallInfo. Returns undefined for items
+   * outside the workspace (lib.d.ts, node_modules) so call graphs contain only
+   * workspace functions.
+   */
+  private async callHierarchyItemToInfo(
+    item: CallHierarchyItem,
+    fromRanges: Range[],
+    rangesUri: string,
+  ): Promise<CallInfo | undefined> {
+    const itemPath = this.workspacePathFromUri(item.uri);
+    if (!itemPath) return undefined;
+    const rangesPath = this.workspacePathFromUri(rangesUri);
+    const rangesText = rangesPath ? this.readTextSafe(rangesPath) : "";
+    // tsserver may hand back an anonymous callback as the item; mapping its
+    // selection range through the addressable symbol tree lands on the nearest
+    // reusable handle (the named enclosing function).
+    let symbolPath: string | undefined;
+    try {
+      const symbols = await this.documentSymbols(itemPath);
+      symbolPath =
+        symbolPathForRange(symbols, item.selectionRange) ??
+        containingFunctionPath(symbols, item.selectionRange.start);
+    } catch {
+      symbolPath = undefined;
+    }
+    return {
+      file: itemPath.relPath,
+      symbolPath: symbolPath ?? item.name,
+      name: item.name,
+      kind: symbolKindName(item.kind),
+      // tsserver occasionally reports the same range twice — dedupe by position.
+      callSites: [
+        ...new Map(
+          fromRanges.map((range) => [
+            `${range.start.line}:${range.start.character}`,
+            {
+              line: range.start.line + 1,
+              column: range.start.character + 1,
+              context: rangesPath
+                ? lineContext(rangesText, range.start.line)
+                : "",
+            },
+          ]),
+        ).values(),
+      ],
+    };
   }
 
   /** Regex search across project files — escape metacharacters for literal text; optional second arg is a glob string. */
@@ -1114,7 +1257,10 @@ export class LspApi {
   ): Promise<string | undefined> {
     try {
       const symbols = await this.documentSymbols(workspacePath);
-      return containingSymbolPath(symbols, location.range.start);
+      // Nearest enclosing FUNCTION, not nearest binding — a reference inside
+      // `const result = await foo(...)` belongs to the containing function,
+      // not to `result` (field report).
+      return containingFunctionPath(symbols, location.range.start);
     } catch {
       return undefined;
     }

@@ -37,6 +37,17 @@ for (const file of files) {
 outline;`,
   },
   {
+    title: "Trace the call graph",
+    writes: false,
+    code: `// Who calls findUser, and what does findUser call?
+const callers = await lsp.incomingCalls("src/users.ts", "findUser");
+const callees = await lsp.outgoingCalls("src/users.ts", "findUser");
+({
+  calledBy: callers.map((c) => c.file + "::" + c.symbolPath),
+  calls: callees.map((c) => c.file + "::" + c.symbolPath),
+});`,
+  },
+  {
     title: "Batch refactor: migrate every caller",
     writes: true,
     code: `// Switch every function that calls AuthService.validate to validateToken.
@@ -119,10 +130,17 @@ script's last expression, JSON-serialized.
   the write ops.
 - \`searchText\` patterns are regexes — escape metacharacters for literal text:
   \`searchText("new NotFoundError\\\\(")\`.
+- To trace calls, use \`incomingCalls\`/\`outgoingCalls\` — they return only TRUE
+  calls, attributed to the enclosing function. \`findReferences\` mixes calls
+  with imports, re-exports, and type references.
 - \`goToDefinition\` only addresses symbols DEFINED in the given file — it cannot
   follow an imported or called name into another module. To resolve a name to
   its definition anywhere in the workspace, use \`findSymbol(name)\` and filter
-  for an exact \`name\` match (it also returns substring matches).
+  for an exact \`name\` match (it also returns substring matches), or
+  \`outgoingCalls\` on the containing function.
+- \`result\` is capped at 50,000 chars (logs at 10,000). Aggregate INSIDE the
+  script — return counts, top-N lists, and compact summaries, never a raw
+  inventory of files/symbols/references.
 - File paths are relative to the workspace root; anything outside it is
   rejected.
 - Diagnostics cover files touched this session only, never the whole project.

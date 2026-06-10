@@ -83,9 +83,11 @@ describe("tool description", () => {
 
   test("the head names every op and the lsp.help() escape hatch", () => {
     // Clients truncate long descriptions at arbitrary points; whatever survives
-    // must include the full op inventory and the way to recover the rest.
+    // must include the full op inventory and the way to recover the rest. The
+    // head is everything before the first body paragraph (~500 chars).
     for (const readonly of [false, true]) {
-      const head = buildToolDescription(readonly).slice(0, 450);
+      const description = buildToolDescription(readonly);
+      const head = description.slice(0, description.indexOf("\n\n", 80));
       expect(head).toContain("await lsp.help()");
       for (const op of READ_OP_NAMES) {
         expect(head).toContain(op);

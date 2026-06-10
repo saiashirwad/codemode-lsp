@@ -61,9 +61,27 @@ describe("golden scripts — the tool-description examples run as-is", () => {
     expect(WORKED_EXAMPLES.map((example) => example.title).sort()).toEqual([
       "Batch refactor: migrate every caller",
       "Explore a project",
+      "Trace the call graph",
       "Write, then check diagnostics",
     ]);
   });
+
+  test(
+    "Trace the call graph",
+    async () => {
+      const payload = await execute(exampleCode("Trace the call graph"));
+      const result = JSON.parse(payload.result) as {
+        calledBy: string[];
+        calls: string[];
+      };
+      expect(result.calledBy).toEqual(["src/auth.ts::createAuthMiddleware"]);
+      // findUser only calls Array.prototype.find — outside the workspace, so
+      // library calls are filtered out.
+      expect(result.calls).toEqual([]);
+      expect(payload.changes).toEqual([]);
+    },
+    { timeout: 30_000 },
+  );
 
   test(
     "Explore a project",

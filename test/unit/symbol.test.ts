@@ -3,6 +3,7 @@ import type { DocumentSymbol, Range } from "vscode-languageserver-protocol";
 import { SymbolKind } from "vscode-languageserver-protocol";
 import {
   buildSymbolInfoTree,
+  containingFunctionPath,
   parseSymbolPath,
   resolveSymbolPath,
 } from "../../src/symbol";
@@ -108,5 +109,56 @@ describe("symbol tree conversion and resolution", () => {
     ).toThrow(
       /Available overloads: AuthService\/constructor\[0\], AuthService\/constructor\[1\], AuthService\/constructor\[2\]/,
     );
+  });
+});
+
+describe("containingFunctionPath", () => {
+  // function process() {        line 0
+  //   const result = await f(); line 2 — `result` is a Variable child symbol
+  // }                           line 5
+  const withLocalBinding: DocumentSymbol[] = [
+    symbol("process", SymbolKind.Function, 0, 5, [
+      symbol("result", SymbolKind.Variable, 2, 2),
+    ]),
+  ];
+
+  test("a position inside a local binding attributes to the enclosing function", () => {
+    // Field report: a call in `const result = await recordInvoicePayment(...)`
+    // was attributed to `process/result` instead of `process`.
+    const path = containingFunctionPath(withLocalBinding, {
+      line: 2,
+      character: 0,
+    });
+    expect(path).toBe("process");
+  });
+
+  test("a position inside a method's local binding attributes to the method", () => {
+    const symbols: DocumentSymbol[] = [
+      symbol("Service", SymbolKind.Class, 0, 10, [
+        symbol("run", SymbolKind.Method, 1, 8, [
+          symbol("outcome", SymbolKind.Variable, 3, 3),
+        ]),
+      ]),
+    ];
+    expect(containingFunctionPath(symbols, { line: 3, character: 0 })).toBe(
+      "Service/run",
+    );
+  });
+
+  test("falls back to the deepest symbol when nothing function-like encloses", () => {
+    const symbols: DocumentSymbol[] = [
+      symbol("Config", SymbolKind.Class, 0, 6, [
+        symbol("defaults", SymbolKind.Property, 2, 4),
+      ]),
+    ];
+    expect(containingFunctionPath(symbols, { line: 3, character: 0 })).toBe(
+      "Config/defaults",
+    );
+  });
+
+  test("returns undefined at top level outside any symbol", () => {
+    expect(
+      containingFunctionPath(withLocalBinding, { line: 20, character: 0 }),
+    ).toBeUndefined();
   });
 });
