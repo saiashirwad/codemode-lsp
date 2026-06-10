@@ -71,15 +71,20 @@ describe("path-alias diagnostics on created files (integration)", () => {
       for (const diagnostic of moduleErrors) {
         expect(diagnostic.message).toContain("FALSE POSITIVE");
         expect(diagnostic.message).toContain("flushed");
+        // Field report: the prose tag alone was not enough — an in-script
+        // gate checking `severity === "error"` rolled back anyway. The flag
+        // is the machine-checkable form of the same classification.
+        expect(diagnostic.likelyFalsePositive).toBe(true);
       }
       buffer.flush();
       api.endTransaction();
 
       // After flush the file is on disk and was bounced into the configured
-      // project — the alias now resolves. Poll briefly for fresh diagnostics.
+      // project — the alias now resolves. Poll for fresh diagnostics; under
+      // parallel-worker load the project reload can take well over 10s.
       api.beginTransaction();
       let messages: string[] = [];
-      for (let attempt = 0; attempt < 10; attempt += 1) {
+      for (let attempt = 0; attempt < 25; attempt += 1) {
         await new Promise((resolve) => setTimeout(resolve, 1_000));
         const diagnostics = await api.getDiagnostics("src/new-module.ts");
         messages = diagnostics.map((d) => d.message);

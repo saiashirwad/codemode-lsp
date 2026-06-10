@@ -117,6 +117,9 @@ reads and writes alike.
 - `Reference.isWriteAccess` is always `false` (not exposed over standard LSP).
 - `getDependencies` is syntactic — a local variable shadowing an import can
   produce a false positive.
+- A file created mid-script reports spurious "Cannot find module" errors for
+  tsconfig path aliases until it is flushed to disk; those diagnostics carry
+  `likelyFalsePositive: true` so verification gates can skip them.
 
 ## Eval
 

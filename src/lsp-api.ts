@@ -97,6 +97,8 @@ export interface Diagnostic {
   range: Range;
   message: string;
   severity: "error" | "warning" | "info" | "hint";
+  /** True when this is probably spurious (e.g. path-alias resolution on a file created this script) — exclude these from any abort/rollback gate. */
+  likelyFalsePositive?: boolean;
 }
 
 export interface WorkspaceSymbolInfo extends SymbolInfo {
@@ -107,7 +109,7 @@ export interface WriteResult {
   file: string;
   /** All files affected — rename can fan out to many. */
   filesChanged: string[];
-  /** Fresh diagnostics for the affected files; check for "error" severity. */
+  /** Fresh diagnostics for the affected files; gate on severity "error" but skip likelyFalsePositive ones. */
   diagnostics: Diagnostic[];
 }
 
@@ -1342,7 +1344,9 @@ export class LspApi {
         typeof diagnostic.message === "string"
           ? diagnostic.message
           : diagnostic.message.value;
+      let likelyFalsePositive = false;
       if (pendingCreation && /Cannot find module/i.test(message)) {
+        likelyFalsePositive = true;
         message +=
           " [likely a FALSE POSITIVE: this file is newly created and not yet " +
           "on disk, so tsconfig path aliases do not resolve in it until the " +
@@ -1350,12 +1354,14 @@ export class LspApi {
           "same module without errors, ignore this; verify with " +
           "getDiagnostics in a follow-up call after the flush.]";
       }
-      return {
+      const converted: Diagnostic = {
         file: workspacePath.relPath,
         range: diagnostic.range,
         message,
         severity: severityName(diagnostic.severity),
       };
+      if (likelyFalsePositive) converted.likelyFalsePositive = true;
+      return converted;
     });
   }
 

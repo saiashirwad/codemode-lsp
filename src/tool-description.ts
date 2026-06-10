@@ -153,9 +153,13 @@ script's last expression, JSON-serialized.
 - Diagnostics cover files touched this session only, never the whole project.
   \`Diagnostic.range\` is zero-based; every other line/column is 1-based.
 - On a file CREATED this script, "Cannot find module" for tsconfig path
-  aliases (\`@/...\`) is usually a false positive — the file joins the TS
-  project only once flushed to disk. Such diagnostics are tagged in-band;
-  don't roll back over them alone.
+  aliases (\`@/...\`) is usually spurious — the file joins the TS project only
+  once flushed to disk. Such diagnostics carry \`likelyFalsePositive: true\`;
+  exclude them from any abort gate:
+  \`d.severity === "error" && !d.likelyFalsePositive\`. For a strict
+  verify-or-rollback workflow, split it across calls: do the writes in one
+  script (so they flush), then check diagnostics — and restore originals if
+  real errors remain — in a follow-up script.
 
 ## API
 
