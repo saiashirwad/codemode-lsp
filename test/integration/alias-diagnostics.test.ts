@@ -49,13 +49,22 @@ describe("path-alias diagnostics on created files (integration)", () => {
     "in-transaction module errors are tagged; post-flush they clear",
     async () => {
       const buffer = api.beginTransaction();
-      const result = await api.writeFile(
+      await api.writeFile(
         "src/new-module.ts",
         'import { findUser } from "@app/users";\nexport const probe = findUser("u1");\n',
       );
-      const moduleErrors = result.diagnostics.filter((d) =>
-        d.message.includes("Cannot find module"),
-      );
+      // Under load the write's own 2s diagnostics window can elapse before
+      // tsserver publishes; the publish is cached, so poll getDiagnostics
+      // (which runs through the same annotation path).
+      let moduleErrors: Awaited<ReturnType<typeof api.getDiagnostics>> = [];
+      for (let attempt = 0; attempt < 10; attempt += 1) {
+        const diagnostics = await api.getDiagnostics("src/new-module.ts");
+        moduleErrors = diagnostics.filter((d) =>
+          d.message.includes("Cannot find module"),
+        );
+        if (moduleErrors.length > 0) break;
+        await new Promise((resolve) => setTimeout(resolve, 1_000));
+      }
       // The alias fails in the inferred project — but the message must say
       // it's likely spurious so a verify gate doesn't abort over it.
       expect(moduleErrors.length).toBeGreaterThan(0);

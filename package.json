@@ -33,7 +33,7 @@
     "prepublishOnly": "bun run check && bun run build",
     "generate:types": "bun run scripts/generate-types.ts",
     "eval": "bun run scripts/eval.ts",
-    "check": "bun run typecheck && bun run lint && bun test",
+    "check": "bun run typecheck && bun run lint && bun test --parallel=4",
     "typecheck": "tsc --noEmit",
     "lint": "biome check .",
     "fix": "biome check --write .",

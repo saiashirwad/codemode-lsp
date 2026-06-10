@@ -162,7 +162,15 @@ describe("LspApi read operations (integration)", () => {
   test(
     "getDiagnostics returns the intentional fixture error after opening the file",
     async () => {
-      const diagnostics = await api.getDiagnostics("src/broken.ts");
+      // getDiagnostics waits up to 2s for tsserver to publish; under load
+      // (parallel test workers) the first window can elapse before anything
+      // arrives. The publish is push-based and cached, so poll a few rounds.
+      let diagnostics: Awaited<ReturnType<typeof api.getDiagnostics>> = [];
+      for (let attempt = 0; attempt < 10; attempt += 1) {
+        diagnostics = await api.getDiagnostics("src/broken.ts");
+        if (diagnostics.length > 0) break;
+        await new Promise((resolve) => setTimeout(resolve, 1_000));
+      }
       expect(
         diagnostics.some((diagnostic) => diagnostic.file === "src/broken.ts"),
       ).toBe(true);
