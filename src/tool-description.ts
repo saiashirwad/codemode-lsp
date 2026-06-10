@@ -112,7 +112,11 @@ script's last expression, JSON-serialized.
   \`listFiles()\` for every file. \`searchText\`'s second argument is a glob
   string — there is no options object; filter results in your script.
 - Symbol paths are slash-separated (\`MyClass/myMethod\`); discover exact paths
-  with \`getSymbols(file)\` rather than guessing.
+  with \`getSymbols(file)\` rather than guessing. Symbol ops always take the
+  pair \`(file, symbolPath)\` — a \`SymbolInfo.path\` belongs to the file you
+  called \`getSymbols\` on.
+- \`searchText\` patterns are regexes — escape metacharacters for literal text:
+  \`searchText("new NotFoundError\\\\(")\`.
 - File paths are relative to the workspace root; anything outside it is
   rejected.
 - Diagnostics cover files touched this session only, never the whole project.`;

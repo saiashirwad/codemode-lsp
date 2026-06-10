@@ -31,6 +31,19 @@ import type { LspClient } from "./lsp-client";
 
 export type FileState = "clean" | "modified" | "created" | "deleted";
 
+const LSP_DOCUMENT_EXTENSIONS = /\.(ts|tsx|mts|cts|js|jsx|mjs|cjs)$/i;
+
+/**
+ * Whether tsserver should be told about this file at all. Opening non-TS files
+ * (lockfiles, markdown, SQL, CSS) as TypeScript documents makes the server
+ * "diagnose" them — observed as tens of thousands of garbage errors in a real
+ * session. Non-eligible files are still fully buffered (flush/rollback work);
+ * they just never produce didOpen/didChange/didClose notifications.
+ */
+export function isLspDocumentPath(path: string): boolean {
+  return LSP_DOCUMENT_EXTENSIONS.test(path);
+}
+
 interface TrackedFile {
   absPath: string;
   state: FileState;
@@ -40,6 +53,8 @@ interface TrackedFile {
   current: string | undefined;
   /** Whether the file existed on disk when first tracked. */
   existedOnDisk: boolean;
+  /** Whether the file is announced to tsserver (see isLspDocumentPath). */
+  lspVisible: boolean;
 }
 
 export interface FlushedChange {
@@ -101,8 +116,18 @@ export class TransactionalBuffer {
   }
 
   /**
-   * Ensure a file is tracked and open in the LSP server with its disk content.
-   * Idempotent. Returns the tracked record.
+   * Buffered content for an already-tracked file, or undefined when the file is
+   * untracked (caller should read disk) or deleted. Unlike {@link getText} this
+   * never tracks/opens the file — for incidental reads (search scans, reference
+   * context) that must not pull thousands of files into tsserver.
+   */
+  peekText(absPath: string): string | undefined {
+    return this.files.get(absPath)?.current;
+  }
+
+  /**
+   * Ensure a file is tracked and (for TS-family files) open in the LSP server
+   * with its disk content. Idempotent. Returns the tracked record.
    */
   track(absPath: string): TrackedFile {
     const existing = this.files.get(absPath);
@@ -115,9 +140,10 @@ export class TransactionalBuffer {
       original,
       current: original,
       existedOnDisk,
+      lspVisible: isLspDocumentPath(absPath),
     };
     this.files.set(absPath, tracked);
-    if (existedOnDisk && original !== undefined) {
+    if (tracked.lspVisible && existedOnDisk && original !== undefined) {
       this.client.didOpen(absPath, original);
     }
     return tracked;
@@ -133,14 +159,17 @@ export class TransactionalBuffer {
       // Writing to a file deleted earlier resurrects it as created/modified.
       tracked.state = tracked.existedOnDisk ? "modified" : "created";
       tracked.current = text;
-      this.client.didOpen(absPath, text);
-      this.client.didChangeFullText(absPath, text);
+      if (tracked.lspVisible) {
+        this.client.didOpen(absPath, text);
+        this.client.didChangeFullText(absPath, text);
+      }
       return;
     }
     tracked.current = text;
     if (tracked.state === "clean") {
       tracked.state = tracked.existedOnDisk ? "modified" : "created";
     }
+    if (!tracked.lspVisible) return;
     if (!this.client.isOpen(absPath)) {
       this.client.didOpen(absPath, text);
     } else {
@@ -167,7 +196,7 @@ export class TransactionalBuffer {
       );
     }
     const wasCreatedThisScript = !tracked.existedOnDisk;
-    this.client.didClose(absPath);
+    if (tracked.lspVisible) this.client.didClose(absPath);
     if (wasCreatedThisScript) {
       // Created then deleted in the same script and never on disk: it leaves no
       // trace, so drop tracking entirely rather than flushing a phantom deletion.
@@ -192,6 +221,7 @@ export class TransactionalBuffer {
     if (tracked.state === "clean") {
       tracked.state = tracked.existedOnDisk ? "modified" : "created";
     }
+    if (!tracked.lspVisible) return;
     if (!this.client.isOpen(absPath)) {
       this.client.didOpen(absPath, tracked.current);
     } else {
@@ -289,7 +319,9 @@ export class TransactionalBuffer {
         continue;
       }
       try {
-        if (file.state === "modified") {
+        if (!file.lspVisible) {
+          // Never announced to tsserver; only the buffer record needs resetting.
+        } else if (file.state === "modified") {
           if (file.original !== undefined && this.client.isOpen(absPath)) {
             this.client.didChangeFullText(absPath, file.original);
           }
@@ -315,6 +347,7 @@ export class TransactionalBuffer {
    */
   rollback(): void {
     for (const [absPath, file] of this.files) {
+      if (!file.lspVisible) continue; // never announced; disk was never touched
       try {
         if (file.state === "modified") {
           if (file.original !== undefined && this.client.isOpen(absPath)) {

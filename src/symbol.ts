@@ -8,7 +8,7 @@ import { SymbolKind } from "vscode-languageserver-protocol";
 
 export interface SymbolInfo {
   name: string;
-  /** Exact slash-separated path for use in other lsp.* calls. */
+  /** Slash-separated path within its file; pass it TOGETHER WITH the same `file` to other lsp.* calls. */
   path: string;
   /** "class" | "function" | "method" | "variable" | ... */
   kind: string;

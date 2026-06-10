@@ -112,6 +112,55 @@ describe("TransactionalBuffer state machine", () => {
     }
   });
 
+  test("non-TS files are buffered but never announced to the language server", () => {
+    const fixture = tempCopy();
+    try {
+      const { client, events } = fakeClient();
+      const buffer = new TransactionalBuffer(client);
+      const abs = join(fixture.dir, "notes.md");
+      writeFileSync(abs, "# notes\n");
+      buffer.track(abs);
+      buffer.setText(abs, "# notes\nedited\n");
+      expect(events).toEqual([]); // no didOpen/didChange for a .md
+      const changes = buffer.flush();
+      expect(changes).toHaveLength(1);
+      expect(readFileSync(abs, "utf8")).toContain("edited");
+    } finally {
+      fixture.cleanup();
+    }
+  });
+
+  test("deleting and rolling back a non-TS file sends no notifications", () => {
+    const fixture = tempCopy();
+    try {
+      const { client, events } = fakeClient();
+      const buffer = new TransactionalBuffer(client);
+      const abs = join(fixture.dir, "notes.md");
+      writeFileSync(abs, "# notes\n");
+      buffer.deleteFile(abs, "notes.md");
+      buffer.rollback();
+      expect(events).toEqual([]);
+      expect(readFileSync(abs, "utf8")).toBe("# notes\n"); // disk untouched
+    } finally {
+      fixture.cleanup();
+    }
+  });
+
+  test("peekText returns buffered content without tracking unknown files", () => {
+    const fixture = tempCopy();
+    try {
+      const { client, events } = fakeClient();
+      const buffer = new TransactionalBuffer(client);
+      const abs = join(fixture.dir, "src/users.ts");
+      expect(buffer.peekText(abs)).toBeUndefined(); // untracked → caller reads disk
+      expect(events).toEqual([]); // peek must not open anything
+      buffer.setText(abs, "export const x = 1;\n");
+      expect(buffer.peekText(abs)).toBe("export const x = 1;\n");
+    } finally {
+      fixture.cleanup();
+    }
+  });
+
   test("created file: writeFile on a new path → didOpen, flush writes it", () => {
     const fixture = tempCopy();
     try {

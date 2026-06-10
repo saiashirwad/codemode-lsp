@@ -71,6 +71,29 @@ describe("file listing and text search", () => {
     );
   });
 
+  test("searchText scans do not open files in the language server", async () => {
+    // Field report: a whole-project searchText during a transaction didOpen'd
+    // every scanned file (lockfiles, markdown, …) into tsserver, which then
+    // "diagnosed" them — 53k garbage errors on a real repo.
+    const opened: string[] = [];
+    const recordingClient = {
+      ensureAlive: async () => {},
+      didOpen: (abs: string) => {
+        opened.push(abs);
+      },
+      isOpen: () => false,
+    } as unknown as LspClient;
+    const trackedApi = new LspApi({
+      rootDir: fixture.dir,
+      client: recordingClient,
+    });
+    trackedApi.beginTransaction();
+    const results = await trackedApi.searchText("findUser");
+    expect(results.length).toBeGreaterThan(0);
+    expect(opened).toEqual([]);
+    trackedApi.endTransaction();
+  });
+
   test("listFiles respects gitignore and hard exclusions", async () => {
     const files = await api.listFiles("**/*.ts");
     expect(files).toContain("src/auth.ts");

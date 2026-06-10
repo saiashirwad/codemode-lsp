@@ -18,7 +18,7 @@ import type {
   WorkspaceSymbol,
 } from "vscode-languageserver-protocol";
 import { DiagnosticSeverity } from "vscode-languageserver-protocol";
-import { TransactionalBuffer } from "./buffer";
+import { isLspDocumentPath, TransactionalBuffer } from "./buffer";
 import type { LspClient } from "./lsp-client";
 import {
   buildSymbolInfoTree,
@@ -340,15 +340,52 @@ export class LspApi {
    * Like {@link readText} but for incidental reads (reference context, search)
    * where a deleted file should just be skipped rather than throw. Returns the
    * buffered content for tracked files, disk content otherwise, or "" if gone.
+   * Crucially it never tracks/opens the file: a searchText scan touches every
+   * project file, and opening them all in tsserver produced tens of thousands
+   * of garbage diagnostics in a real session.
    */
   private readTextSafe(resolved: ResolvedWorkspacePath): string {
-    if (this.buffer?.isDeleted(resolved.absPath)) return "";
+    if (this.buffer) {
+      if (this.buffer.isDeleted(resolved.absPath)) return "";
+      const buffered = this.buffer.peekText(resolved.absPath);
+      if (buffered !== undefined) return buffered;
+    }
     try {
-      return this.readText(resolved);
+      return readFileSync(resolved.absPath, "utf8");
     } catch {
-      return existsSync(resolved.absPath)
-        ? readFileSync(resolved.absPath, "utf8")
-        : "";
+      return "";
+    }
+  }
+
+  /**
+   * Validate an op's string arguments up front with self-correction guidance.
+   * Field report: wrong-shape calls previously died with raw JS errors — a
+   * symbol name passed as a file became ENOENT, a missing second argument
+   * became "input.trim is not a function" — none of which tell the model what
+   * the op actually expects. `contentArgs` may be empty strings.
+   */
+  private requireStrings(
+    signature: string,
+    example: string,
+    args: Record<string, unknown>,
+    contentArgs: string[] = [],
+  ): void {
+    for (const [name, value] of Object.entries(args)) {
+      const allowEmpty = contentArgs.includes(name);
+      if (typeof value === "string" && (allowEmpty || value.trim() !== "")) {
+        continue;
+      }
+      const got =
+        value === undefined
+          ? "nothing (missing argument)"
+          : value === null
+            ? "null"
+            : Array.isArray(value)
+              ? "an array"
+              : `${typeof value === "object" ? "an" : "a"} ${typeof value}`;
+      throw new Error(
+        `${signature}: "${name}" must be a ${allowEmpty ? "" : "non-empty "}string but got ${got}. Example: ${example}`,
+      );
     }
   }
 
@@ -388,6 +425,9 @@ export class LspApi {
 
   /** File contents as a raw string (no line numbers). */
   async readFile(file: string): Promise<string> {
+    this.requireStrings("readFile(file)", 'await lsp.readFile("src/auth.ts")', {
+      file,
+    });
     const resolved = this.resolveWorkspacePath(file);
     await this.ensureReadyForBuffer();
     return this.readText(resolved);
@@ -395,6 +435,11 @@ export class LspApi {
 
   /** Source code of one symbol. Get exact symbolPath values from getSymbols. */
   async getSymbolBody(file: string, symbolPath: string): Promise<string> {
+    this.requireStrings(
+      "getSymbolBody(file, symbolPath)",
+      'await lsp.getSymbolBody("src/auth.ts", "AuthService/validate") — get file and symbolPath from getSymbols(file)',
+      { file, symbolPath },
+    );
     const resolved = this.resolveWorkspacePath(file);
     await this.ensureReadyForBuffer();
     const text = this.readText(resolved);
@@ -419,14 +464,24 @@ export class LspApi {
 
   /** Document symbol tree (file outline). Every path is a usable handle. */
   async getSymbols(file: string): Promise<SymbolInfo[]> {
+    this.requireStrings(
+      "getSymbols(file)",
+      'await lsp.getSymbols("src/auth.ts")',
+      { file },
+    );
     const resolved = this.resolveWorkspacePath(file);
     await this.ensureReadyForBuffer();
     const text = this.readText(resolved);
     return buildSymbolInfoTree(await this.documentSymbols(resolved), text);
   }
 
-  /** Workspace-wide symbol search; paths are best-effort (confirm with getSymbols). */
+  /** Workspace-wide symbol search; the index warms lazily, so early calls may be empty — getSymbols(file) is exhaustive. */
   async findSymbol(query: string): Promise<WorkspaceSymbolInfo[]> {
+    this.requireStrings(
+      "findSymbol(query)",
+      'await lsp.findSymbol("AuthService")',
+      { query },
+    );
     const symbols = await this.workspaceSymbolWithIndexWait(query);
     const mapped: WorkspaceSymbolInfo[] = [];
     for (const symbol of symbols) {
@@ -458,6 +513,11 @@ export class LspApi {
 
   /** All references to a symbol across the workspace (incl. the declaration). */
   async findReferences(file: string, symbolPath: string): Promise<Reference[]> {
+    this.requireStrings(
+      "findReferences(file, symbolPath)",
+      'await lsp.findReferences("src/auth.ts", "AuthService/validate") — get file and symbolPath from getSymbols(file)',
+      { file, symbolPath },
+    );
     const resolved = this.resolveWorkspacePath(file);
     const symbol = resolveSymbolPath({
       file: resolved.relPath,
@@ -493,6 +553,11 @@ export class LspApi {
 
   /** Jump to a symbol's definition. */
   async goToDefinition(file: string, symbolPath: string): Promise<Location> {
+    this.requireStrings(
+      "goToDefinition(file, symbolPath)",
+      'await lsp.goToDefinition("src/auth.ts", "AuthService/validate")',
+      { file, symbolPath },
+    );
     const resolved = this.resolveWorkspacePath(file);
     const symbol = resolveSymbolPath({
       file: resolved.relPath,
@@ -512,8 +577,13 @@ export class LspApi {
     return this.locationToApiLocation(first);
   }
 
-  /** Regex search across project files; optional second arg is a glob string. */
+  /** Regex search across project files — escape metacharacters for literal text; optional second arg is a glob string. */
   async searchText(pattern: string, glob?: string): Promise<SearchResult[]> {
+    this.requireStrings(
+      "searchText(pattern, glob?)",
+      'await lsp.searchText("new NotFoundError\\\\(", "src/**") — the pattern is a regex; escape metacharacters for literal text',
+      { pattern },
+    );
     if (glob !== undefined && glob !== null && typeof glob !== "string") {
       // Observed failure mode: scripts invent an options object here, which
       // would otherwise silently match nothing.
@@ -615,8 +685,16 @@ export class LspApi {
 
   /** Diagnostics for a file, or every file touched this session (not project-wide). */
   async getDiagnostics(file?: string): Promise<Diagnostic[]> {
-    if (file) {
+    if (file !== undefined && file !== null) {
+      this.requireStrings(
+        "getDiagnostics(file?)",
+        'await lsp.getDiagnostics("src/auth.ts") — or no argument for every file touched this session',
+        { file },
+      );
       const resolved = this.resolveWorkspacePath(file);
+      // tsserver only produces meaningful diagnostics for TS-family files;
+      // asking about a lockfile/markdown/etc. is a quick, clean empty answer.
+      if (!isLspDocumentPath(resolved.absPath)) return [];
       await this.client.ensureAlive();
       // During a transaction the file may carry buffered edits; track() opens it
       // at buffered content rather than re-reading disk.
@@ -649,6 +727,11 @@ export class LspApi {
     symbolPath: string,
     newName: string,
   ): Promise<WriteResult> {
+    this.requireStrings(
+      "renameSymbol(file, symbolPath, newName)",
+      'await lsp.renameSymbol("src/auth.ts", "AuthService/validate", "checkToken")',
+      { file, symbolPath, newName },
+    );
     const buffer = this.requireBuffer("renameSymbol");
     const resolved = this.resolveWorkspacePath(file);
     const symbol = resolveSymbolPath({
@@ -715,6 +798,12 @@ export class LspApi {
     symbolPath: string,
     newText: string,
   ): Promise<WriteResult> {
+    this.requireStrings(
+      "replaceSymbolBody(file, symbolPath, newText)",
+      'await lsp.replaceSymbolBody("src/auth.ts", "AuthService/validate", "validate(token: Token): boolean { … }")',
+      { file, symbolPath, newText },
+      ["newText"],
+    );
     return this.editSymbolRange(file, symbolPath, (symbol) => ({
       range: symbol.range,
       newText,
@@ -727,6 +816,12 @@ export class LspApi {
     symbolPath: string,
     text: string,
   ): Promise<WriteResult> {
+    this.requireStrings(
+      "insertBeforeSymbol(file, symbolPath, text)",
+      'await lsp.insertBeforeSymbol("src/auth.ts", "AuthService", "// header\\n")',
+      { file, symbolPath, text },
+      ["text"],
+    );
     // Anchor to column 0 of the symbol's start line so the inserted block lands on
     // its own line(s) above the whole declaration — not mid-line after a leading
     // `export const` (a symbol's range often starts at the name, not the modifier).
@@ -745,6 +840,12 @@ export class LspApi {
     symbolPath: string,
     text: string,
   ): Promise<WriteResult> {
+    this.requireStrings(
+      "insertAfterSymbol(file, symbolPath, text)",
+      'await lsp.insertAfterSymbol("src/auth.ts", "AuthService", "export const x = 1;\\n")',
+      { file, symbolPath, text },
+      ["text"],
+    );
     // Anchor just past the end of the symbol's last line.
     return this.editSymbolRange(file, symbolPath, (symbol) => ({
       range: { start: symbol.range.end, end: symbol.range.end },
@@ -754,6 +855,11 @@ export class LspApi {
 
   /** Remove a symbol including its leading JSDoc/decorators. */
   async deleteSymbol(file: string, symbolPath: string): Promise<WriteResult> {
+    this.requireStrings(
+      "deleteSymbol(file, symbolPath)",
+      'await lsp.deleteSymbol("src/auth.ts", "AuthService/validate")',
+      { file, symbolPath },
+    );
     const buffer = this.requireBuffer("deleteSymbol");
     const resolved = this.resolveWorkspacePath(file);
     await this.client.ensureAlive();
@@ -775,6 +881,12 @@ export class LspApi {
 
   /** Create or overwrite a whole file (escape hatch for non-symbol edits). */
   async writeFile(file: string, content: string): Promise<WriteResult> {
+    this.requireStrings(
+      "writeFile(file, content)",
+      'await lsp.writeFile("src/new.ts", "export const x = 1;\\n")',
+      { file, content },
+      ["content"],
+    );
     const buffer = this.requireBuffer("writeFile");
     const resolved = this.resolveWorkspacePath(file);
     await this.client.ensureAlive();
@@ -789,6 +901,11 @@ export class LspApi {
 
   /** Delete a file. */
   async deleteFile(file: string): Promise<WriteResult> {
+    this.requireStrings(
+      "deleteFile(file)",
+      'await lsp.deleteFile("src/old.ts")',
+      { file },
+    );
     const buffer = this.requireBuffer("deleteFile");
     const resolved = this.resolveWorkspacePath(file);
     await this.client.ensureAlive();
@@ -908,7 +1025,12 @@ export class LspApi {
    * sent didChange, so tsserver re-publishes for these URIs.
    */
   private async collectDiagnostics(absPaths: string[]): Promise<Diagnostic[]> {
-    const uris = absPaths.map((absPath) => pathToFileURL(absPath).href);
+    // Non-TS files are never opened in tsserver (see buffer.ts), so waiting for
+    // their diagnostics would just burn the 2s timeout.
+    const uris = absPaths
+      .filter((absPath) => isLspDocumentPath(absPath))
+      .map((absPath) => pathToFileURL(absPath).href);
+    if (uris.length === 0) return [];
     await this.client.waitForDiagnosticsForUris(uris);
     return uris.flatMap((uri) =>
       this.convertDiagnosticsForUri(
