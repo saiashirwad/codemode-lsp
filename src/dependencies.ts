@@ -81,9 +81,10 @@ function collectImportBindings(
 /**
  * Whether an identifier node is a USE of a name, rather than a property name
  * or a declaration name. `payments.eq` must not count `eq`; `const eq = …`
- * declares rather than uses.
+ * declares rather than uses. Exported for move-symbol's "does the remaining
+ * file still use the moved name" check.
  */
-function isUsageIdentifier(node: ts.Identifier): boolean {
+export function isUsageIdentifier(node: ts.Identifier): boolean {
   const parent = node.parent;
   if (ts.isPropertyAccessExpression(parent) && parent.name === node) {
     return false;

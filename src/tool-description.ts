@@ -48,6 +48,17 @@ const callees = await lsp.outgoingCalls("src/users.ts", "findUser");
 });`,
   },
   {
+    title: "Move a symbol and verify the project",
+    writes: true,
+    code: `// Move a top-level symbol to another module — the target's imports are
+// computed, every importer is repointed, and the source's imports pruned.
+const moved = await lsp.moveSymbol("src/auth.ts", "createAuthMiddleware", "src/middleware.ts");
+// Verify the WHOLE project over the buffered state — unlike per-file
+// getDiagnostics, path aliases resolve here even in files created this script.
+const check = await lsp.checkProject();
+({ filesChanged: moved.filesChanged, projectErrors: check.errorCount });`,
+  },
+  {
     title: "Batch refactor: migrate every caller",
     writes: true,
     code: `// Switch every function that calls AuthService.validate to validateToken.
@@ -137,9 +148,12 @@ script's last expression, JSON-serialized.
 - To trace calls, use \`incomingCalls\`/\`outgoingCalls\` — they return only TRUE
   calls, attributed to the enclosing function. \`findReferences\` mixes calls
   with imports, re-exports, and type references.
-- Planning to move or split code? \`getDependencies(file, symbolPath)\` computes
-  what a symbol's body needs from outside itself — its required imports and
-  same-file helpers — so you never reverse-engineer the import header.
+- Moving code? \`moveSymbol(file, symbolPath, targetFile)\` moves a TOP-LEVEL
+  symbol end to end: target imports computed, importers repointed, source
+  imports pruned — don't hand-splice what it can do in one call. For custom
+  splits, \`getDependencies(file, symbolPath)\` computes what a symbol's body
+  needs from outside itself (required imports + same-file helpers), and
+  \`organizeImports\`/\`addMissingImports\` clean up import blocks natively.
 - \`goToDefinition\` only addresses symbols DEFINED in the given file — it cannot
   follow an imported or called name into another module. To resolve a name to
   its definition anywhere in the workspace, use \`findSymbol(name)\` and filter
@@ -147,19 +161,20 @@ script's last expression, JSON-serialized.
   \`outgoingCalls\` on the containing function.
 - \`result\` is capped at 50,000 chars (logs at 10,000). Aggregate INSIDE the
   script — return counts, top-N lists, and compact summaries, never a raw
-  inventory of files/symbols/references.
+  inventory of files/symbols/references. \`getSymbols(file, 1)\` returns just
+  the top-level outline when you don't need every nested property.
 - File paths are relative to the workspace root; anything outside it is
   rejected.
 - Diagnostics cover files touched this session only, never the whole project.
   \`Diagnostic.range\` is zero-based; every other line/column is 1-based.
-- On a file CREATED this script, "Cannot find module" for tsconfig path
-  aliases (\`@/...\`) is usually spurious — the file joins the TS project only
-  once flushed to disk. Such diagnostics carry \`likelyFalsePositive: true\`;
-  exclude them from any abort gate:
-  \`d.severity === "error" && !d.likelyFalsePositive\`. For a strict
-  verify-or-rollback workflow, split it across calls: do the writes in one
-  script (so they flush), then check diagnostics — and restore originals if
-  real errors remain — in a follow-up script.
+- On a file CREATED this script, per-file getDiagnostics reports "Cannot find
+  module" for tsconfig path aliases (\`@/...\`) spuriously — the file joins the
+  TS project only once flushed to disk. Such diagnostics carry
+  \`likelyFalsePositive: true\`; exclude them from any abort gate:
+  \`d.severity === "error" && !d.likelyFalsePositive\`. Better: use
+  \`checkProject()\` as the verify gate for multi-file refactors — it
+  type-checks the whole buffered project with full alias resolution, created
+  files included, so it has no such false positives.
 
 ## API
 

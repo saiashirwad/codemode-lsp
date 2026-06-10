@@ -36,10 +36,11 @@ const COMMON_INTERFACE_NAMES = [
   "Location",
   "SearchResult",
   "Diagnostic",
+  "ProjectCheckResult",
 ] as const;
 
 /** Interfaces only reachable from write ops — stripped under CODEMODE_READONLY. */
-const WRITE_INTERFACE_NAMES = ["WriteResult"] as const;
+const WRITE_INTERFACE_NAMES = ["WriteResult", "MoveSymbolResult"] as const;
 
 /**
  * Position/Range come from vscode-languageserver-protocol in the source, so the
@@ -189,6 +190,9 @@ export function generateTypesModuleSource(): string {
   const lspApiDts = parseDts(requireOutput(outputs, "lsp-api.d.ts"));
   const symbolDts = parseDts(requireOutput(outputs, "symbol.d.ts"));
   const dependenciesDts = parseDts(requireOutput(outputs, "dependencies.d.ts"));
+  const projectCheckDts = parseDts(
+    requireOutput(outputs, "project-check.d.ts"),
+  );
 
   const interfaces = new Map([
     ...extractInterfaces(symbolDts, ["SymbolInfo"]),
@@ -196,6 +200,7 @@ export function generateTypesModuleSource(): string {
       "SymbolDependencies",
       "ImportDependency",
     ]),
+    ...extractInterfaces(projectCheckDts, ["ProjectCheckResult"]),
     ...extractInterfaces(lspApiDts, [
       ...COMMON_INTERFACE_NAMES,
       ...WRITE_INTERFACE_NAMES,

@@ -61,10 +61,41 @@ describe("golden scripts — the tool-description examples run as-is", () => {
     expect(WORKED_EXAMPLES.map((example) => example.title).sort()).toEqual([
       "Batch refactor: migrate every caller",
       "Explore a project",
+      "Move a symbol and verify the project",
       "Trace the call graph",
       "Write, then check diagnostics",
     ]);
   });
+
+  test(
+    "Move a symbol and verify the project",
+    async () => {
+      const payload = await execute(
+        exampleCode("Move a symbol and verify the project"),
+      );
+      const result = JSON.parse(payload.result) as {
+        filesChanged: string[];
+        projectErrors: number;
+      };
+      expect(result.filesChanged).toEqual(["src/auth.ts", "src/middleware.ts"]);
+      // checkProject sees the whole project — including the intentional
+      // type error in src/broken.ts. The move itself adds no errors.
+      expect(result.projectErrors).toBe(1);
+      expect(payload.changes.map((change) => change.file).sort()).toEqual([
+        "src/auth.ts",
+        "src/middleware.ts",
+      ]);
+      const onDisk = readFileSync(
+        join(fixture.dir, "src/middleware.ts"),
+        "utf8",
+      );
+      expect(onDisk).toContain("export function createAuthMiddleware");
+      expect(onDisk).toContain(
+        'import { AuthService, type Token } from "./auth";',
+      );
+    },
+    { timeout: 30_000 },
+  );
 
   test(
     "Trace the call graph",

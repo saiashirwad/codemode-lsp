@@ -39,6 +39,14 @@ describe("LspApi read operations (integration)", () => {
         (symbol) => symbol.path === "AuthService/validate",
       );
       expect(validate?.signature).toContain("validate");
+
+      // depth: 1 trims to the top-level outline (field report: a 700-line
+      // file's full nested tree blew the result cap).
+      const topLevel = await api.getSymbols("src/auth.ts", 1);
+      expect(topLevel.map((symbol) => symbol.path)).toContain("AuthService");
+      expect(topLevel.every((symbol) => symbol.children === undefined)).toBe(
+        true,
+      );
     },
     { timeout: 30_000 },
   );

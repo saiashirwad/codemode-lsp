@@ -62,7 +62,7 @@ export interface SandboxOptions {
   /** Script timeout in ms. Defaults to {@link DEFAULT_TIMEOUT_MS}. */
   timeoutMs?: number;
   /**
-   * When true, the 7 write ops are absent from the sandbox `lsp` object entirely
+   * When true, the write ops are absent from the sandbox `lsp` object entirely
    * (CODEMODE_READONLY). Read ops + getDiagnostics remain. Defaults to false.
    */
   readonly?: boolean;
@@ -88,9 +88,10 @@ export const READ_OP_NAMES = [
   "searchText",
   "listFiles",
   "getDiagnostics",
+  "checkProject",
 ] as const;
 
-/** The 7 write ops — absent from the sandbox under CODEMODE_READONLY. */
+/** The write ops — absent from the sandbox under CODEMODE_READONLY. */
 export const WRITE_OP_NAMES = [
   "renameSymbol",
   "replaceSymbolBody",
@@ -99,6 +100,9 @@ export const WRITE_OP_NAMES = [
   "deleteSymbol",
   "writeFile",
   "deleteFile",
+  "moveSymbol",
+  "organizeImports",
+  "addMissingImports",
 ] as const;
 
 type OpName = (typeof READ_OP_NAMES)[number] | (typeof WRITE_OP_NAMES)[number];

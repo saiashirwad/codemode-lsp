@@ -18,12 +18,15 @@ import type {
   CallHierarchyIncomingCall,
   CallHierarchyItem,
   CallHierarchyOutgoingCall,
+  CodeAction,
+  Command,
   Definition,
   Diagnostic,
   DocumentSymbol,
   InitializeResult,
   Location,
   LocationLink,
+  Range as LspRange,
   Position,
   PublishDiagnosticsParams,
   SymbolInformation,
@@ -384,6 +387,31 @@ export class LspClient {
     return this.openVersions.has(pathToFileURL(abs).href);
   }
 
+  /**
+   * Request code actions of the given kinds for a range. With literal support
+   * advertised, typescript-language-server returns CodeAction objects with
+   * inline WorkspaceEdits for the source.* kinds (verified by spike).
+   */
+  async codeAction(params: {
+    uri: string;
+    range: LspRange;
+    only: string[];
+  }): Promise<CodeAction[]> {
+    await this.ensureAlive();
+    const result = await this.request<(CodeAction | Command)[] | null>(
+      "textDocument/codeAction",
+      {
+        textDocument: { uri: params.uri },
+        range: params.range,
+        context: { diagnostics: [], only: params.only },
+      },
+    );
+    return (result ?? []).filter(
+      (action): action is CodeAction =>
+        typeof action === "object" && action !== null && "kind" in action,
+    );
+  }
+
   async rename(
     params: UriPosition & { newName: string },
   ): Promise<WorkspaceEdit | null> {
@@ -610,6 +638,22 @@ export class LspClient {
           references: {},
           rename: { prepareSupport: true },
           callHierarchy: {},
+          // Literal support makes TLS return CodeAction objects with inline
+          // WorkspaceEdits (verified by spike) instead of bare Commands that
+          // would need executeCommand round trips.
+          codeAction: {
+            codeActionLiteralSupport: {
+              codeActionKind: {
+                valueSet: [
+                  "source",
+                  "source.organizeImports",
+                  "source.organizeImports.ts",
+                  "source.removeUnusedImports.ts",
+                  "source.addMissingImports.ts",
+                ],
+              },
+            },
+          },
           synchronization: { didSave: false, willSave: false },
           // typescript-language-server 4.x only pushes textDocument/
           // publishDiagnostics when the client advertises support for it.

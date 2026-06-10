@@ -83,4 +83,29 @@ describe("lsp.* argument validation", () => {
       api.outgoingCalls(7 as unknown as string, "recordPayment"),
     ).rejects.toThrow(/outgoingCalls\(file, symbolPath\).*"file".*a number/s);
   });
+
+  test("getSymbols rejects a non-integer depth with the meaning spelled out", async () => {
+    await expect(api.getSymbols("src/auth.ts", 0)).rejects.toThrow(
+      /depth.*positive integer.*top-level/s,
+    );
+    await expect(api.getSymbols("src/auth.ts", 1.5)).rejects.toThrow(
+      /positive integer/,
+    );
+  });
+
+  test("moveSymbol validates all three arguments", async () => {
+    // @ts-expect-error deliberate wrong arity
+    await expect(api.moveSymbol("src/auth.ts", "Token")).rejects.toThrow(
+      /moveSymbol\(file, symbolPath, targetFile\).*"targetFile".*missing argument.*Example/s,
+    );
+  });
+
+  test("organizeImports and addMissingImports reject non-string files", async () => {
+    await expect(
+      api.organizeImports(undefined as unknown as string),
+    ).rejects.toThrow(/organizeImports\(file\).*"file".*missing argument/s);
+    await expect(api.addMissingImports(3 as unknown as string)).rejects.toThrow(
+      /addMissingImports\(file\).*"file".*a number/s,
+    );
+  });
 });

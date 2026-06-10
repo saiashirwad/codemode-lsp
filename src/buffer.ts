@@ -239,6 +239,23 @@ export class TransactionalBuffer {
     }
   }
 
+  /**
+   * Snapshot of buffered content for every non-clean file: absPath → current
+   * text, or undefined for deletions. Lets an in-process type check
+   * (checkProject) see the transaction's state without touching disk.
+   */
+  overlay(): Map<string, string | undefined> {
+    const snapshot = new Map<string, string | undefined>();
+    for (const [absPath, file] of this.files) {
+      if (file.state === "clean") continue;
+      snapshot.set(
+        absPath,
+        file.state === "deleted" ? undefined : file.current,
+      );
+    }
+    return snapshot;
+  }
+
   /** All currently-dirty files' absolute paths. */
   dirtyPaths(): string[] {
     const paths: string[] = [];

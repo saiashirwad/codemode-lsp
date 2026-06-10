@@ -7,6 +7,7 @@ import {
 } from "node:fs";
 import { dirname, isAbsolute, relative, resolve, sep } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
+import ts from "typescript";
 import type {
   CallHierarchyItem,
   DocumentSymbol,
@@ -22,6 +23,23 @@ import { DiagnosticSeverity } from "vscode-languageserver-protocol";
 import { isLspDocumentPath, TransactionalBuffer } from "./buffer";
 import { analyzeDependencies, type SymbolDependencies } from "./dependencies";
 import type { LspClient } from "./lsp-client";
+import {
+  type AliasMaps,
+  addExportModifiers,
+  aliasMapsFromPaths,
+  EMPTY_ALIAS_MAPS,
+  ensureTopLevelExport,
+  type HeaderImport,
+  namesUsedOutsideImports,
+  relativeSpecifier,
+  renderImportHeader,
+  rewireMovedImport,
+  rewriteSpecifier,
+  specifierResolvesTo,
+  stripModuleExtension,
+  topLevelTypeNames,
+} from "./move-symbol";
+import { type ProjectCheckResult, runProjectCheck } from "./project-check";
 import {
   buildSymbolInfoTree,
   containingFunctionPath,
@@ -112,6 +130,13 @@ export interface WriteResult {
   /** Fresh diagnostics for the affected files; gate on severity "error" but skip likelyFalsePositive ones. */
   diagnostics: Diagnostic[];
 }
+
+export interface MoveSymbolResult extends WriteResult {
+  /** Same-file dependencies left behind in `file` that were auto-exported so the moved body can import them. */
+  autoExported: string[];
+}
+
+export type { ProjectCheckResult } from "./project-check";
 
 export interface ResolvedWorkspacePath {
   absPath: string;
@@ -269,6 +294,15 @@ function expandDeletionRange(text: string, range: Range): Range {
     endChar = 0;
   }
   return { start, end: { line: endLine, character: endChar } };
+}
+
+/** Trim a symbol tree to `depth` levels (1 = top-level symbols, no children). */
+function trimSymbolTreeDepth(tree: SymbolInfo[], depth: number): SymbolInfo[] {
+  return tree.map((symbol) => {
+    const { children, ...rest } = symbol;
+    if (depth <= 1 || !children || children.length === 0) return rest;
+    return { ...rest, children: trimSymbolTreeDepth(children, depth - 1) };
+  });
 }
 
 function severityName(severity: number | undefined): Diagnostic["severity"] {
@@ -488,17 +522,26 @@ export class LspApi {
     return text.slice(start, end);
   }
 
-  /** Document symbol tree (file outline). Every path is a usable handle. */
-  async getSymbols(file: string): Promise<SymbolInfo[]> {
+  /** Document symbol tree (file outline). Every path is a usable handle. Pass depth: 1 for top-level symbols only (big files produce big trees). */
+  async getSymbols(file: string, depth?: number): Promise<SymbolInfo[]> {
     this.requireStrings(
       "getSymbols(file)",
       'await lsp.getSymbols("src/auth.ts")',
       { file },
     );
+    if (depth !== undefined && (!Number.isInteger(depth) || depth < 1)) {
+      throw new Error(
+        `getSymbols(file, depth): "depth" must be a positive integer (1 = top-level symbols only) but got ${JSON.stringify(depth)}. Example: await lsp.getSymbols("src/auth.ts", 1)`,
+      );
+    }
     const resolved = this.resolveWorkspacePath(file);
     await this.ensureReadyForBuffer();
     const text = this.readText(resolved);
-    return buildSymbolInfoTree(await this.documentSymbols(resolved), text);
+    const tree = buildSymbolInfoTree(
+      await this.documentSymbols(resolved),
+      text,
+    );
+    return depth === undefined ? tree : trimSymbolTreeDepth(tree, depth);
   }
 
   /** Workspace-wide symbol search; matches substrings, so filter for exact `name`. The index warms lazily — early calls may be empty; getSymbols(file) is exhaustive. */
@@ -1101,6 +1144,361 @@ export class LspApi {
       filesChanged: [resolved.relPath],
       diagnostics: [],
     };
+  }
+
+  /**
+   * Type-check the WHOLE project: an in-process TypeScript program over the
+   * buffered state under the real tsconfig. Unlike per-file getDiagnostics,
+   * path aliases resolve even in files created this script — use this as the
+   * verify gate for multi-file refactors. Slow on big projects (full program).
+   */
+  async checkProject(): Promise<ProjectCheckResult> {
+    return runProjectCheck({
+      rootDir: this.rootDir,
+      overlay: this.buffer?.overlay() ?? new Map(),
+    });
+  }
+
+  /** Drop a file's unused imports, then sort and merge the rest (native TS organize-imports). */
+  async organizeImports(file: string): Promise<WriteResult> {
+    this.requireStrings(
+      "organizeImports(file)",
+      'await lsp.organizeImports("src/auth.ts")',
+      { file },
+    );
+    // tsserver splits the behavior: organizeImports alone is non-destructive
+    // (sort/merge), removeUnusedImports does the dropping. Chain both.
+    return this.runSourceAction(file, [
+      ["source.removeUnusedImports.ts"],
+      ["source.organizeImports.ts", "source.organizeImports"],
+    ]);
+  }
+
+  /** Add import statements for every unresolved name the file uses (native TS auto-import). Most reliable on files that already exist on disk. */
+  async addMissingImports(file: string): Promise<WriteResult> {
+    this.requireStrings(
+      "addMissingImports(file)",
+      'await lsp.addMissingImports("src/auth.ts")',
+      { file },
+    );
+    return this.runSourceAction(file, [["source.addMissingImports.ts"]]);
+  }
+
+  /** Move a TOP-LEVEL symbol to another file (created if missing): brings its JSDoc, computes the target's imports, back-imports if the source still uses it, repoints every importer (alias-aware), and prunes the source's now-unused imports. The moved symbol becomes exported. */
+  async moveSymbol(
+    file: string,
+    symbolPath: string,
+    targetFile: string,
+  ): Promise<MoveSymbolResult> {
+    this.requireStrings(
+      "moveSymbol(file, symbolPath, targetFile)",
+      'await lsp.moveSymbol("src/commands.ts", "loadSnapshot", "src/snapshot.ts")',
+      { file, symbolPath, targetFile },
+    );
+    const buffer = this.requireBuffer("moveSymbol");
+    const source = this.resolveWorkspacePath(file);
+    const target = this.resolveWorkspacePath(targetFile);
+    if (source.absPath === target.absPath) {
+      throw new Error(
+        `moveSymbol: source and target are the same file ("${source.relPath}").`,
+      );
+    }
+    if (!isLspDocumentPath(target.absPath)) {
+      throw new Error(
+        `moveSymbol: target "${target.relPath}" must be a TypeScript/JavaScript file.`,
+      );
+    }
+    await this.client.ensureAlive();
+    const text = this.readText(source);
+    const symbols = await this.documentSymbols(source);
+    const symbol = resolveSymbolPath({
+      file: source.relPath,
+      symbolPath,
+      symbols,
+    });
+    if (symbol.path.includes("/")) {
+      throw new Error(
+        `moveSymbol moves TOP-LEVEL symbols only, but "${symbol.path}" is nested inside "${symbol.path.split("/")[0]}". Move the whole top-level symbol, or restructure with getSymbolBody + writeFile.`,
+      );
+    }
+    const movedName = symbol.path.replace(/\[\d+\]$/, "");
+    const infoTree = buildSymbolInfoTree(symbols, text);
+
+    // Everything below mutates only after all analysis ran on the pre-move text.
+    const deps = analyzeDependencies({
+      fileName: source.relPath,
+      sourceText: text,
+      range: symbol.range,
+      topLevelNames: infoTree.map((info) => info.name),
+      selfName: movedName,
+    });
+    await this.warmReferenceIndex(source, symbol.selectionRange.start, buffer);
+    const locations = await this.client.references({
+      uri: source.uri,
+      position: symbol.selectionRange.start,
+    });
+    const referencingPaths = new Map<string, ResolvedWorkspacePath>();
+    for (const location of locations) {
+      const workspacePath = this.workspacePathFromUri(location.uri);
+      if (!workspacePath) continue;
+      if (workspacePath.absPath === source.absPath) continue;
+      if (workspacePath.absPath === target.absPath) continue;
+      referencingPaths.set(workspacePath.absPath, workspacePath);
+    }
+
+    const movedRange = expandDeletionRange(text, symbol.range);
+    const startOffset = offsetAt(
+      text,
+      movedRange.start.line,
+      movedRange.start.character,
+    );
+    const endOffset = offsetAt(
+      text,
+      movedRange.end.line,
+      movedRange.end.character,
+    );
+    const movedText = ensureTopLevelExport(
+      target.relPath,
+      `${text.slice(startOffset, endOffset).trimEnd()}\n`,
+      movedName,
+    );
+
+    const aliases = this.loadAliasMaps();
+    const typeNames = topLevelTypeNames(source.relPath, text, [
+      ...deps.sameFile,
+      movedName,
+    ]);
+
+    // Construct the target's import header deterministically from the
+    // dependency analysis — no auto-import involved, so it works identically
+    // for created files.
+    const byModule = new Map<
+      string,
+      { names: string[]; typeOnlyNames: string[] }
+    >();
+    const bucketFor = (specifier: string) => {
+      const existing = byModule.get(specifier);
+      if (existing) return existing;
+      const bucket = { names: [], typeOnlyNames: [] };
+      byModule.set(specifier, bucket);
+      return bucket;
+    };
+    for (const dependency of deps.imports) {
+      const specifier = rewriteSpecifier(
+        dependency.from,
+        source.relPath,
+        target.relPath,
+      );
+      // A dependency that resolves to the target itself needs no import there.
+      if (
+        specifierResolvesTo(specifier, target.relPath, target.relPath, aliases)
+      ) {
+        continue;
+      }
+      const bucket = bucketFor(specifier);
+      (dependency.typeOnly ? bucket.typeOnlyNames : bucket.names).push(
+        dependency.name,
+      );
+    }
+    if (deps.sameFile.length > 0) {
+      const fromSource = relativeSpecifier(target.relPath, source.relPath);
+      const bucket = bucketFor(fromSource);
+      for (const name of deps.sameFile) {
+        (typeNames.has(name) ? bucket.typeOnlyNames : bucket.names).push(name);
+      }
+    }
+    const headerImports: HeaderImport[] = [...byModule.entries()].map(
+      ([from, bucket]) => ({ from, ...bucket }),
+    );
+    const header = renderImportHeader(headerImports);
+
+    const targetExisted =
+      !buffer.isDeleted(target.absPath) &&
+      (buffer.peekText(target.absPath) !== undefined ||
+        existsSync(target.absPath));
+    const newTargetText = targetExisted
+      ? `${header ? `${header}\n` : ""}${this.readText(target).trimEnd()}\n\n${movedText}`
+      : `${header ? `${header}\n\n` : ""}${movedText}`;
+
+    // Source: cut the block, auto-export stayed-behind dependencies, add a
+    // back-import when the remaining code still uses the moved symbol.
+    let newSourceText = text.slice(0, startOffset) + text.slice(endOffset);
+    const notExported = deps.sameFile.filter(
+      (name) => !infoTree.some((info) => info.name === name && info.exported),
+    );
+    const exportResult = addExportModifiers(
+      source.relPath,
+      newSourceText,
+      notExported,
+    );
+    newSourceText = exportResult.text;
+    const stillUsed = namesUsedOutsideImports(source.relPath, newSourceText, [
+      movedName,
+    ]).has(movedName);
+    if (stillUsed) {
+      const keyword = typeNames.has(movedName) ? "import type" : "import";
+      const specifier = relativeSpecifier(source.relPath, target.relPath);
+      newSourceText = `${keyword} { ${movedName} } from "${specifier}";\n${newSourceText}`;
+    }
+
+    buffer.writeFile(target.absPath, newTargetText);
+    buffer.writeFile(source.absPath, newSourceText);
+    // Native cleanups: drop the source imports the moved body took with it;
+    // merge the prepended header into a pre-existing target's import block.
+    // Both files exist on disk here, so the configured project serves them.
+    await this.applyCodeActionEdits(source, ["source.removeUnusedImports.ts"]);
+    if (targetExisted) {
+      await this.applyCodeActionEdits(target, ["source.organizeImports.ts"]);
+    }
+
+    // Repoint every importer, preserving its specifier style (alias importers
+    // stay on the alias when the target maps onto one).
+    const targetBase = stripModuleExtension(target.relPath);
+    const changedReferencers: string[] = [];
+    for (const [absPath, refPath] of referencingPaths) {
+      const refText = this.readText(refPath);
+      const rewired = rewireMovedImport({
+        fileName: refPath.relPath,
+        sourceText: refText,
+        movedName,
+        isOldModule: (specifier) =>
+          specifierResolvesTo(
+            specifier,
+            refPath.relPath,
+            source.relPath,
+            aliases,
+          ),
+        newSpecifierFor: (oldSpecifier) =>
+          oldSpecifier.startsWith(".")
+            ? relativeSpecifier(refPath.relPath, target.relPath)
+            : (aliases.toAlias(targetBase) ??
+              relativeSpecifier(refPath.relPath, target.relPath)),
+      });
+      if (rewired.changed) {
+        buffer.writeFile(absPath, rewired.text);
+        changedReferencers.push(absPath);
+      }
+    }
+
+    const touched = [source.absPath, target.absPath, ...changedReferencers];
+    const diagnostics = await this.collectDiagnostics(touched);
+    return {
+      file: source.relPath,
+      filesChanged: touched.map((absPath) => this.relPathFor(absPath)).sort(),
+      diagnostics,
+      autoExported: exportResult.exported,
+    };
+  }
+
+  /**
+   * Request the first matching source.* code action for the file's full range
+   * and apply its WorkspaceEdit through the buffer. Returns affected absPaths.
+   */
+  private async applyCodeActionEdits(
+    resolved: ResolvedWorkspacePath,
+    kinds: string[],
+  ): Promise<string[]> {
+    const buffer = this.requireBuffer("applyCodeActionEdits");
+    const text = buffer.getText(resolved.absPath, resolved.relPath);
+    const lines = text.split("\n");
+    const range = {
+      start: { line: 0, character: 0 },
+      end: {
+        line: Math.max(lines.length - 1, 0),
+        character: lines[lines.length - 1]?.length ?? 0,
+      },
+    };
+    const actions = await this.client.codeAction({
+      uri: resolved.uri,
+      range,
+      only: kinds,
+    });
+    const affected: string[] = [];
+    for (const action of actions) {
+      if (!action.edit) continue;
+      for (const [absPath, edits] of this.workspaceEditToEdits(action.edit)) {
+        buffer.applyEdits(absPath, edits);
+        affected.push(absPath);
+      }
+      break;
+    }
+    return affected;
+  }
+
+  private async runSourceAction(
+    file: string,
+    rounds: string[][],
+  ): Promise<WriteResult> {
+    const resolved = this.resolveWorkspacePath(file);
+    this.requireBuffer(rounds[0]?.[0] ?? "sourceAction");
+    await this.ensureReadyForBuffer();
+    const applyRounds = async (): Promise<string[]> => {
+      const paths: string[] = [];
+      for (const kinds of rounds) {
+        paths.push(...(await this.applyCodeActionEdits(resolved, kinds)));
+      }
+      return paths;
+    };
+    // Auto-import (and unused-detection) need tsserver's project semantics,
+    // which warm up shortly after open — retry briefly before trusting an
+    // empty answer, since "no action" is also the legitimate no-op result.
+    let affected = await applyRounds();
+    for (let attempt = 0; attempt < 6 && affected.length === 0; attempt += 1) {
+      await new Promise((resolve) => setTimeout(resolve, 500));
+      affected = await applyRounds();
+    }
+    affected = [...new Set(affected)];
+    if (affected.length === 0) {
+      return { file: resolved.relPath, filesChanged: [], diagnostics: [] };
+    }
+    const diagnostics = await this.collectDiagnostics(affected);
+    return {
+      file: resolved.relPath,
+      filesChanged: affected.map((absPath) => this.relPathFor(absPath)).sort(),
+      diagnostics,
+    };
+  }
+
+  private aliasMapsCache: AliasMaps | null = null;
+
+  /** tsconfig "paths" → alias maps, best-effort (no aliases → relative-only rewiring). */
+  private loadAliasMaps(): AliasMaps {
+    if (this.aliasMapsCache) return this.aliasMapsCache;
+    let maps = EMPTY_ALIAS_MAPS;
+    try {
+      const configPath = ts.findConfigFile(
+        this.rootDir,
+        ts.sys.fileExists.bind(ts.sys),
+      );
+      if (configPath && resolve(configPath).startsWith(resolve(this.rootDir))) {
+        const config = ts.readConfigFile(configPath, ts.sys.readFile);
+        const parsed = ts.parseJsonConfigFileContent(
+          config.config ?? {},
+          ts.sys,
+          resolve(configPath, ".."),
+        );
+        const paths = parsed.options.paths;
+        if (paths) {
+          const base =
+            parsed.options.baseUrl ??
+            (parsed.options as { pathsBasePath?: string }).pathsBasePath ??
+            resolve(configPath, "..");
+          const workspaceRelative: Record<string, string[]> = {};
+          for (const [pattern, targets] of Object.entries(paths)) {
+            workspaceRelative[pattern] = targets.map((targetPattern) =>
+              toPosixPath(
+                relative(this.rootDir, resolve(String(base), targetPattern)),
+              ),
+            );
+          }
+          maps = aliasMapsFromPaths(workspaceRelative);
+        }
+      }
+    } catch {
+      // Alias maps are an enhancement; relative-specifier rewiring still works.
+    }
+    this.aliasMapsCache = maps;
+    return maps;
   }
 
   /**

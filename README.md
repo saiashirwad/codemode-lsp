@@ -68,21 +68,29 @@ returns `{ result, logs, changes }`:
 - **changes** — every file that hit disk, as `{ file, kind, diff }` with a
   unified diff against the pre-script content; empty for read-only scripts
 
-**Read ops (11):**
+**Read ops (12):**
 
 | | |
 | --- | --- |
-| `readFile`, `getSymbols`, `getSymbolBody` | file contents, outline, one symbol's source |
+| `readFile`, `getSymbols`, `getSymbolBody` | file contents, outline (`getSymbols(file, 1)` for top level only), one symbol's source |
 | `findSymbol`, `findReferences`, `goToDefinition` | workspace symbol search, all references, definition |
 | `incomingCalls`, `outgoingCalls` | call hierarchy — true calls only, attributed to the enclosing function, resolved across modules (`findReferences` mixes calls with imports and re-exports) |
 | `getDependencies` | what a symbol's body needs from outside itself: used imports (module + type-only flag) and same-file helpers — makes moving a symbol a computation, not an eyeballing exercise |
+| `checkProject` | whole-project type check over the *buffered* state — the verify gate for multi-file refactors; tsconfig path aliases resolve even in files created mid-script |
 | `searchText`, `listFiles` | regex search and glob listing (`.gitignore`-aware) |
 
-**Write ops (7):** `renameSymbol`, `replaceSymbolBody`, `insertBeforeSymbol`,
-`insertAfterSymbol`, `deleteSymbol`, `writeFile`, `deleteFile` — all buffered,
-flushed atomically, each returning fresh diagnostics for the files it touched.
+**Write ops (10):**
 
-Plus `getDiagnostics` for type errors on session-touched files.
+| | |
+| --- | --- |
+| `moveSymbol` | move a top-level symbol to another file end to end: the target's import header is computed from the dependency analysis, importers are repointed (alias-aware, shared declarations split), the source gets a back-import if it still uses the symbol, and its now-unused imports are pruned |
+| `organizeImports`, `addMissingImports` | native tsserver import hygiene: drop-unused + sort/merge, and auto-import every unresolved name |
+| `renameSymbol`, `replaceSymbolBody`, `insertBeforeSymbol`, `insertAfterSymbol`, `deleteSymbol` | symbol-level edits |
+| `writeFile`, `deleteFile` | whole-file escape hatches |
+
+All buffered, flushed atomically, each returning fresh diagnostics for the
+files it touched. Plus `getDiagnostics` for type errors on session-touched
+files.
 
 Symbols are addressed by slash-separated paths (`MyClass/myMethod`) discovered
 via `getSymbols`. The full type definitions are embedded in the tool
@@ -101,7 +109,7 @@ No config file. Three environment variables:
 | --- | --- | --- |
 | `CODEMODE_TIMEOUT_MS` | `30000` | Script timeout |
 | `CODEMODE_LSP_BIN` | bundled `typescript-language-server` | Language server command |
-| `CODEMODE_READONLY` | unset | `1`/`true` removes the 7 write ops from the sandbox, the type defs, and the tool description |
+| `CODEMODE_READONLY` | unset | `1`/`true` removes the write ops from the sandbox, the type defs, and the tool description |
 
 Workspace root = the server's cwd. Paths resolving outside it are rejected,
 reads and writes alike.
@@ -110,16 +118,22 @@ reads and writes alike.
 
 - TypeScript/JavaScript only (the architecture is language-agnostic; more
   servers later).
-- Diagnostics cover files touched in the session, not the whole project —
-  `tsserver` only publishes for opened files.
+- Per-file diagnostics cover files touched in the session, not the whole
+  project — `tsserver` only publishes for opened files. `checkProject()` is
+  the whole-project check.
 - A synchronous infinite loop (`while (true) {}`) is not interrupted by the
   script timeout; async work is.
 - `Reference.isWriteAccess` is always `false` (not exposed over standard LSP).
 - `getDependencies` is syntactic — a local variable shadowing an import can
   produce a false positive.
-- A file created mid-script reports spurious "Cannot find module" errors for
-  tsconfig path aliases until it is flushed to disk; those diagnostics carry
-  `likelyFalsePositive: true` so verification gates can skip them.
+- A file created mid-script reports spurious per-file "Cannot find module"
+  errors for tsconfig path aliases until it is flushed to disk; those
+  diagnostics carry `likelyFalsePositive: true` so verification gates can skip
+  them. `checkProject()` has no such false positives — it resolves aliases
+  over the buffered state.
+- `moveSymbol` moves top-level symbols only, and same-file dependencies it
+  leaves behind are auto-exported when the moved body needs them (reported in
+  `autoExported`).
 
 ## Eval
 
