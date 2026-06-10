@@ -61,7 +61,7 @@ export interface CallSite {
 export interface CallInfo {
   /** The other function: the caller (incomingCalls) or the callee (outgoingCalls). */
   file: string;
-  /** Its symbol path — round-trips into other lsp.* calls together with `file`. */
+  /** Its symbol path — round-trips into other lsp.* calls together with `file`; "" when the call sits at module top level (no enclosing function). */
   symbolPath: string;
   name: string;
   kind: string;
@@ -699,7 +699,11 @@ export class LspApi {
     }
     return {
       file: itemPath.relPath,
-      symbolPath: symbolPath ?? item.name,
+      // When no addressable symbol encloses the call (e.g. module-level code,
+      // bare test(...) blocks), tsserver hands back the source FILE as the
+      // item; its name (a filename) is not a symbol path and would not
+      // round-trip. "" marks top level, same convention as Reference.
+      symbolPath: symbolPath ?? "",
       name: item.name,
       kind: symbolKindName(item.kind),
       // tsserver occasionally reports the same range twice — dedupe by position.

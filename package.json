@@ -1,6 +1,6 @@
 {
   "name": "codemode-lsp",
-  "version": "0.2.0",
+  "version": "0.2.1",
   "description": "MCP server exposing a single code-mode tool backed by LSP",
   "keywords": [
     "mcp",
