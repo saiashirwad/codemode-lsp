@@ -26,26 +26,24 @@ v1 targets TypeScript projects via `typescript-language-server`.
 
 ## Setup
 
-Requires [Bun](https://bun.sh). From a clone:
-
-```sh
-bun install
-```
-
-Then add the server to your MCP client. The workspace root is the directory the
-server is spawned from, so for a project-level `.mcp.json` (Claude Code spawns
-servers from the project directory):
+Add the server to your MCP client — no install step needed. The package bundles
+its own `typescript-language-server`, so `npx`/`bunx` is all it takes. The
+workspace root is the directory the server is spawned from, so for a
+project-level `.mcp.json` (Claude Code spawns servers from the project
+directory):
 
 ```json
 {
   "mcpServers": {
     "codemode-lsp": {
-      "command": "bun",
-      "args": ["run", "/absolute/path/to/codemode-lsp/src/index.ts"]
+      "command": "npx",
+      "args": ["-y", "codemode-lsp"]
     }
   }
 }
 ```
+
+(`"command": "bunx"` with `"args": ["codemode-lsp"]` works too.)
 
 To try it on a repo it physically cannot write to, add:
 
@@ -53,8 +51,8 @@ To try it on a repo it physically cannot write to, add:
       "env": { "CODEMODE_READONLY": "1" }
 ```
 
-(Publishing so `bunx codemode-lsp` works from a clean machine is planned —
-PRD build-plan phase 6.)
+Running from a clone instead: requires [Bun](https://bun.sh) — `bun install`,
+then use `"command": "bun"`, `"args": ["run", "/absolute/path/to/codemode-lsp/src/index.ts"]`.
 
 ## The `execute` tool
 
@@ -100,12 +98,30 @@ reads and writes alike.
   script timeout; async work is.
 - `Reference.isWriteAccess` is always `false` (not exposed over standard LSP).
 
+## Eval
+
+`bun run eval` measures the project's core success criterion: can an LLM, given
+only the tool description, write correct scripts? It runs 15 benchmark tasks
+(exploration, reference-finding, diagnostics, renames, multi-file refactors)
+against a throwaway copy of the fixture project. The agent is headless Claude
+Code (`claude -p`, billed to your Claude subscription — no API key) with every
+built-in tool disabled, so the only way to solve a task is the `execute` tool.
+Grading is deterministic: read tasks are scored on the final answer, write
+tasks on the resulting disk state.
+
+Each task ships with a reference solution that runs against the real server as
+part of `bun test`, so the benchmark itself can never rot. The eval is run on
+demand, never in CI.
+
+Current pass rate: **15/15 (100%)** — headless Claude Code (Fable 5), 2026-06-10.
+
 ## Development
 
 ```sh
 bun run check        # typecheck + lint + all tests — run before declaring done
 bun test             # all tests (integration tests run the real language server)
 bun run generate:types  # regenerate src/lsp-types.generated.ts after API changes
+bun run eval         # LLM benchmark (on demand; needs the claude CLI)
 ```
 
 The worked examples in the tool description run verbatim as golden tests

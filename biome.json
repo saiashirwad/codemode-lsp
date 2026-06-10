@@ -5,6 +5,7 @@
       "**",
       "!test/fixtures",
       "!node_modules",
+      "!dist",
       "!src/lsp-types.generated.ts"
     ]
   },

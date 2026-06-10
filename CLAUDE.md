@@ -9,6 +9,7 @@ See `PRD.md` for the full spec — it is the document of record (VISION.md and a
 - `bun test --watch <file>` — fast iteration on one test file
 - `bun run typecheck` / `bun run lint` — individual gates
 - `bun run fix` — auto-fix lint + formatting (run instead of hand-fixing style)
+- `bun run eval` — LLM benchmark suite (PRD phase 6). On-demand only, never in CI: it drives headless Claude Code (`claude -p`) under a Claude subscription. `--task <id>` runs a subset.
 
 ## Repo layout
 
@@ -17,10 +18,11 @@ See `PRD.md` for the full spec — it is the document of record (VISION.md and a
 - `test/integration/` — tests against the real typescript-language-server
 - `test/fixtures/sample/` — the shared fixture TS project. Excluded from root typecheck/lint. `src/broken.ts` has an intentional type error for diagnostics tests — never "fix" it.
 - `test/helpers/fixture.ts` — fixture paths, `tempFixture()` for tests that write to disk, `lspBin` path
+- `scripts/eval-tasks.ts` + `scripts/eval.ts` — the eval benchmark (15 tasks, graders, reference solutions) and its runner. Reference solutions are verified by `test/integration/eval-tasks.test.ts` in the normal suite, so the benchmark itself never rots.
 
 ## Conventions & gotchas
 
-- **Everything is hermetic**: `typescript-language-server` and `typescript` are devDependencies. Always spawn the server via `lspBin` from `test/helpers/fixture.ts`, never a global binary. Fresh clone setup is just `bun install`.
+- **Everything is hermetic**: `typescript-language-server` and `typescript` are regular dependencies (since phase 6, so a published install carries its own language server). In tests, always spawn the server via `lspBin` from `test/helpers/fixture.ts`, never a global binary. Fresh clone setup is just `bun install`.
 - Tests that write to disk must use `tempFixture()` (copies the fixture to a temp dir) — never mutate `test/fixtures/sample/` in place.
 - LSP integration tests need generous timeouts (server init takes seconds) — pass `{ timeout: 30_000 }` to the test.
 - Bun runtime, but no Bun-specific APIs in `src/` — code must also run on Node. Bun APIs are fine in tests/scripts.

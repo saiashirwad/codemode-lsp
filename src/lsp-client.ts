@@ -1,6 +1,7 @@
 import { type ChildProcess, spawn } from "node:child_process";
 import { type Dirent, readdirSync, readFileSync } from "node:fs";
-import { isAbsolute, join } from "node:path";
+import { createRequire } from "node:module";
+import { dirname, isAbsolute, join } from "node:path";
 import { pathToFileURL } from "node:url";
 import {
   CancellationReceiverStrategy,
@@ -115,6 +116,39 @@ function normalizeDefinition(
   });
 }
 
+/**
+ * Default language-server command: the typescript-language-server installed
+ * alongside this package, so a published `npx codemode-lsp` works without the
+ * binary being on the user's PATH. Falls back to a bare PATH lookup when the
+ * package is not resolvable (e.g. an exotic install layout).
+ */
+function defaultLspBin(): string {
+  try {
+    return createRequire(import.meta.url).resolve(
+      "typescript-language-server/lib/cli.mjs",
+    );
+  } catch {
+    return "typescript-language-server";
+  }
+}
+
+/**
+ * The tsserver.js shipped with this package's own `typescript` dependency.
+ * Passed to the language server as `tsserver.fallbackPath` so workspaces
+ * without a local typescript install still work; a workspace install, when
+ * present, takes precedence (typescript-language-server's documented order).
+ */
+function bundledTsserverPath(): string | undefined {
+  try {
+    const pkg = createRequire(import.meta.url).resolve(
+      "typescript/package.json",
+    );
+    return join(dirname(pkg), "lib", "tsserver.js");
+  } catch {
+    return undefined;
+  }
+}
+
 export interface LspClientOptions {
   /** Workspace root. The server is spawned with this cwd. Defaults to process.cwd(). */
   rootDir?: string;
@@ -166,9 +200,7 @@ export class LspClient {
   constructor(options: LspClientOptions = {}) {
     this.rootDir = options.rootDir ?? process.cwd();
     this.lspBin =
-      options.lspBin ??
-      process.env.CODEMODE_LSP_BIN ??
-      "typescript-language-server";
+      options.lspBin ?? process.env.CODEMODE_LSP_BIN ?? defaultLspBin();
     this.requestTimeoutMs = options.requestTimeoutMs ?? 10_000;
     this.warmupTimeoutMs = options.warmupTimeoutMs ?? 3_000;
   }
@@ -405,7 +437,13 @@ export class LspClient {
   }
 
   private async spawnAndHandshake(): Promise<void> {
-    const proc = spawn(this.lspBin, ["--stdio"], {
+    // A .js/.mjs lspBin (the resolved default) is run through the current
+    // runtime; anything else (PATH command, .bin shim) is spawned directly.
+    const isScript = /\.[cm]?js$/.test(this.lspBin);
+    const [command, args] = isScript
+      ? [process.execPath, [this.lspBin, "--stdio"]]
+      : [this.lspBin, ["--stdio"]];
+    const proc = spawn(command, args, {
       cwd: this.rootDir,
       stdio: ["pipe", "pipe", "pipe"],
     });
@@ -519,9 +557,13 @@ export class LspClient {
 
   private initializeParams(): Record<string, unknown> {
     const rootUri = pathToFileURL(this.rootDir).href;
+    const fallbackPath = bundledTsserverPath();
     return {
       processId: process.pid,
       clientInfo: { name: "codemode-lsp", version: "0.1.0" },
+      ...(fallbackPath && {
+        initializationOptions: { tsserver: { fallbackPath } },
+      }),
       rootUri,
       workspaceFolders: [{ uri: rootUri, name: "root" }],
       capabilities: {

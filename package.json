@@ -2,14 +2,37 @@
   "name": "codemode-lsp",
   "version": "0.1.0",
   "description": "MCP server exposing a single code-mode tool backed by LSP",
+  "keywords": [
+    "mcp",
+    "lsp",
+    "typescript",
+    "code-mode",
+    "modelcontextprotocol"
+  ],
+  "license": "MIT",
+  "author": "Sai Ashirwad",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/saiashirwad/codemode-lsp.git"
+  },
+  "bugs": "https://github.com/saiashirwad/codemode-lsp/issues",
+  "homepage": "https://github.com/saiashirwad/codemode-lsp#readme",
   "type": "module",
-  "private": true,
   "bin": {
-    "codemode-lsp": "src/index.ts"
+    "codemode-lsp": "dist/index.js"
+  },
+  "files": [
+    "dist"
+  ],
+  "engines": {
+    "node": ">=18"
   },
   "scripts": {
     "start": "bun run src/index.ts",
+    "build": "bun build src/index.ts --target=node --outdir=dist",
+    "prepublishOnly": "bun run check && bun run build",
     "generate:types": "bun run scripts/generate-types.ts",
+    "eval": "bun run scripts/eval.ts",
     "check": "bun run typecheck && bun run lint && bun test",
     "typecheck": "tsc --noEmit",
     "lint": "biome check .",
@@ -21,14 +44,14 @@
   "dependencies": {
     "@modelcontextprotocol/sdk": "^1.0.0",
     "acorn": "^8.0.0",
+    "typescript": "^5.0.0",
+    "typescript-language-server": "^4.0.0",
     "vscode-jsonrpc": "^8.2.0",
     "vscode-languageserver-protocol": "^3.17.0",
     "zod": "^3.25 || ^4.0"
   },
   "devDependencies": {
     "@biomejs/biome": "^2.0.0",
-    "@types/bun": "^1.0.0",
-    "typescript": "^5.0.0",
-    "typescript-language-server": "^4.0.0"
+    "@types/bun": "^1.0.0"
   }
 }
