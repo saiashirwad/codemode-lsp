@@ -8,9 +8,11 @@ import { LspClient } from "./lsp-client";
 import {
   DEFAULT_TIMEOUT_MS,
   formatTrace,
+  RESULT_CHAR_CAP,
   runSandbox,
   SandboxError,
 } from "./sandbox";
+import { buildToolDescription } from "./tool-description";
 
 /** A single flushed change with a reviewable unified diff (PRD § The execute Tool). */
 export interface Change {
@@ -31,32 +33,27 @@ export interface ExecuteResult {
   changes: Change[];
 }
 
-function buildToolDescription(readonly: boolean): string {
-  const writeSection = readonly
-    ? ""
-    : `
-Write operations available (changes are buffered and applied atomically when the
-script succeeds; rolled back if it throws): renameSymbol, replaceSymbolBody,
-insertBeforeSymbol, insertAfterSymbol, deleteSymbol, writeFile, deleteFile. Each
-returns { file, filesChanged, diagnostics }. The execute result's \`changes\` lists
-every flushed file as { file, kind, diff } with a reviewable unified diff.`;
-  return `Execute JavaScript to perform semantic code operations via LSP.
+/** Marker replacing diff content once the combined result + diffs exceed the cap. */
+export const DIFF_TRUNCATION_MARKER =
+  "[diff truncated — result + diffs exceeded 50000 chars. The file WAS written; use lsp.readFile to inspect it.]";
 
-Write a script that chains \`lsp.*\` calls (e.g. \`await lsp.getSymbols("src/api.ts")\`).
-The script runs in a sandbox with \`lsp.*\`, \`console.log/warn/error\` (captured), and
-\`path.join/basename/dirname/extname\`. Returns { result, logs, changes }.
-
-Read operations available: readFile, getSymbolBody, getSymbols, findSymbol,
-findReferences, goToDefinition, searchText, listFiles, getDiagnostics.${writeSection}
-
-Important:
-- The last expression in the script is the return value. End with the value you
-  want back (e.g. \`({ files: files.length })\`), not just side effects.
-- Symbol paths use \`/\`: \`MyClass/myMethod\`. Use \`getSymbols(file)\` to discover the
-  exact paths — never guess them.
-- \`.filter()\`/\`.map()\` callbacks cannot be async; use \`for...of\` with \`await\`.
-- File paths are relative to the workspace root; paths outside it are rejected.
-- Diagnostics cover touched files only, not the whole project.`;
+/**
+ * Diffs count toward the 50k result cap (PRD § The execute Tool). Spend the
+ * budget left over after `result` on diffs in order; once it runs out, replace
+ * the overflow with a marker. `file` and `kind` always survive, so the change
+ * list itself stays complete.
+ */
+export function capChanges(changes: Change[], budget: number): Change[] {
+  let remaining = budget;
+  return changes.map((change) => {
+    if (change.diff.length <= remaining) {
+      remaining -= change.diff.length;
+      return change;
+    }
+    const kept = remaining > 0 ? change.diff.slice(0, remaining) : "";
+    remaining = 0;
+    return { ...change, diff: kept + DIFF_TRUNCATION_MARKER };
+  });
 }
 
 export interface ExecuteToolDeps {
@@ -118,7 +115,15 @@ export function createExecuteRunner(deps: ExecuteToolDeps): {
             change.updated,
           ),
         }));
-        return { result, logs, changes };
+        // Diffs count toward the result size cap (PRD § The execute Tool).
+        return {
+          result,
+          logs,
+          changes: capChanges(
+            changes,
+            Math.max(0, RESULT_CHAR_CAP - result.length),
+          ),
+        };
       } catch (error) {
         // Failure → roll back the LSP buffer; disk is untouched.
         const wasDirty = buffer.isDirty();

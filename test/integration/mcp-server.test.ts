@@ -70,6 +70,27 @@ describe("execute tool via the MCP SDK (integration)", () => {
   );
 
   test(
+    "recovers transparently after the language server dies between calls",
+    async () => {
+      const before = await execute(
+        `(await lsp.getSymbols("src/auth.ts")).length`,
+      );
+      expect(Number(JSON.parse(before.result))).toBeGreaterThan(0);
+
+      // Simulate a crash between execute calls. The eager health check at the
+      // start of the next execute must respawn + re-handshake the server
+      // without the client seeing an error (PRD § Crash recovery).
+      await created.client.killServer();
+
+      const after = await execute(
+        `(await lsp.getSymbols("src/auth.ts")).length`,
+      );
+      expect(JSON.parse(after.result)).toBe(JSON.parse(before.result));
+    },
+    { timeout: 60_000 },
+  );
+
+  test(
     "a failing script returns the error and operation trace",
     async () => {
       const payload = await execute(

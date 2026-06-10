@@ -9,6 +9,7 @@
   },
   "scripts": {
     "start": "bun run src/index.ts",
+    "generate:types": "bun run scripts/generate-types.ts",
     "check": "bun run typecheck && bun run lint && bun test",
     "typecheck": "tsc --noEmit",
     "lint": "biome check .",

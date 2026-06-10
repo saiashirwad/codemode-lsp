@@ -1,0 +1,77 @@
+import { describe, expect, test } from "bun:test";
+import { readFileSync } from "node:fs";
+import {
+  generatedPath,
+  generateTypesModuleSource,
+} from "../../scripts/generate-types";
+import { WRITE_OP_NAMES } from "../../src/sandbox";
+import {
+  buildToolDescription,
+  renderLspTypes,
+  WORKED_EXAMPLES,
+} from "../../src/tool-description";
+
+describe("generated type definitions", () => {
+  test(
+    "src/lsp-types.generated.ts is up to date (else run `bun run generate:types`)",
+    () => {
+      const onDisk = readFileSync(generatedPath, "utf8");
+      expect(onDisk).toBe(generateTypesModuleSource());
+    },
+    // Building the tsc program for declaration emit takes a few seconds.
+    { timeout: 60_000 },
+  );
+
+  test("full mode renders the read + write surface", () => {
+    const types = renderLspTypes(false);
+    expect(types).toContain("interface SymbolInfo");
+    expect(types).toContain("interface WriteResult");
+    expect(types).toContain("declare const lsp: {");
+    expect(types).toContain("readFile(file: string): Promise<string>;");
+    expect(types).toContain(
+      "renameSymbol(file: string, symbolPath: string, newName: string): Promise<WriteResult>;",
+    );
+  });
+
+  test("readonly mode strips write ops and WriteResult", () => {
+    const types = renderLspTypes(true);
+    expect(types).toContain("readFile(file: string): Promise<string>;");
+    expect(types).toContain("getDiagnostics(file?: string)");
+    for (const op of WRITE_OP_NAMES) {
+      expect(types).not.toContain(op);
+    }
+    expect(types).not.toContain("WriteResult");
+  });
+});
+
+describe("tool description", () => {
+  test("every placeholder is replaced", () => {
+    for (const readonly of [false, true]) {
+      const description = buildToolDescription(readonly);
+      expect(description).not.toContain("{{types}}");
+      expect(description).not.toContain("{{writeSemantics}}");
+      expect(description).not.toContain("{{examples}}");
+    }
+  });
+
+  test("embeds the generated types", () => {
+    const description = buildToolDescription(false);
+    expect(description).toContain("interface SymbolInfo");
+    expect(description).toContain("declare const lsp: {");
+  });
+
+  test("full mode includes every worked example; readonly only read examples", () => {
+    const full = buildToolDescription(false);
+    for (const example of WORKED_EXAMPLES) {
+      expect(full).toContain(example.code);
+    }
+    const readonlyDescription = buildToolDescription(true);
+    for (const example of WORKED_EXAMPLES) {
+      if (example.writes) {
+        expect(readonlyDescription).not.toContain(example.code);
+      } else {
+        expect(readonlyDescription).toContain(example.code);
+      }
+    }
+  });
+});

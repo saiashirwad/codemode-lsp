@@ -69,7 +69,7 @@ export interface SandboxOptions {
 }
 
 /** Read ops + getDiagnostics — always exposed, even under CODEMODE_READONLY. */
-const READ_OP_NAMES = [
+export const READ_OP_NAMES = [
   "readFile",
   "getSymbolBody",
   "getSymbols",
@@ -82,7 +82,7 @@ const READ_OP_NAMES = [
 ] as const;
 
 /** The 7 write ops — absent from the sandbox under CODEMODE_READONLY. */
-const WRITE_OP_NAMES = [
+export const WRITE_OP_NAMES = [
   "renameSymbol",
   "replaceSymbolBody",
   "insertBeforeSymbol",

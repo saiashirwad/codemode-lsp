@@ -1,7 +1,12 @@
 import { describe, expect, test } from "bun:test";
 import type { LspApi } from "../../src/lsp-api";
 import type { LspClient } from "../../src/lsp-client";
-import { createExecuteRunner } from "../../src/mcp-server";
+import {
+  type Change,
+  capChanges,
+  createExecuteRunner,
+  DIFF_TRUNCATION_MARKER,
+} from "../../src/mcp-server";
 
 /** Minimal LspApi stub — the failing-warmup tests never reach an lsp.* call. */
 function stubApi(): LspApi {
@@ -74,5 +79,43 @@ describe("createExecuteRunner error normalization", () => {
     const second = await execute("2 + 3");
     expect(second.result).toBe("5");
     expect(calls).toBe(2);
+  });
+});
+
+describe("capChanges — diffs count toward the result size cap", () => {
+  const change = (file: string, diff: string): Change => ({
+    file,
+    kind: "modified",
+    diff,
+  });
+
+  test("changes within budget pass through untouched", () => {
+    const changes = [
+      change("a.ts", "x".repeat(10)),
+      change("b.ts", "y".repeat(10)),
+    ];
+    expect(capChanges(changes, 50)).toEqual(changes);
+  });
+
+  test("a diff overflowing the budget is cut at the budget with the marker", () => {
+    const [capped] = capChanges([change("a.ts", "x".repeat(30))], 10);
+    expect(capped?.diff).toBe("x".repeat(10) + DIFF_TRUNCATION_MARKER);
+  });
+
+  test("after the budget is spent, later changes keep file/kind but lose the diff", () => {
+    const changes = [
+      change("a.ts", "x".repeat(10)),
+      change("b.ts", "y".repeat(10)),
+    ];
+    const capped = capChanges(changes, 10);
+    expect(capped[0]?.diff).toBe("x".repeat(10));
+    expect(capped[1]?.file).toBe("b.ts");
+    expect(capped[1]?.kind).toBe("modified");
+    expect(capped[1]?.diff).toBe(DIFF_TRUNCATION_MARKER);
+  });
+
+  test("zero budget replaces every diff with the marker", () => {
+    const [capped] = capChanges([change("a.ts", "x")], 0);
+    expect(capped?.diff).toBe(DIFF_TRUNCATION_MARKER);
   });
 });

@@ -8,11 +8,15 @@ import { SymbolKind } from "vscode-languageserver-protocol";
 
 export interface SymbolInfo {
   name: string;
+  /** Exact slash-separated path for use in other lsp.* calls. */
   path: string;
+  /** "class" | "function" | "method" | "variable" | ... */
   kind: string;
   exported: boolean;
+  /** 1-based. */
   startLine: number;
   endLine: number;
+  /** One-line signature; often avoids a getSymbolBody call. */
   signature?: string;
   children?: SymbolInfo[];
 }

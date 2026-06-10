@@ -28,30 +28,42 @@ export type { SymbolInfo } from "./symbol";
 
 export interface Reference {
   file: string;
+  /** 1-based. */
   line: number;
+  /** 1-based. */
   column: number;
+  /** The actual line of code containing the reference. */
   context: string;
+  /** Path of the symbol containing the reference (a reusable handle); "" at top level. */
   symbolPath: string;
+  /** Always false in v1 — the language server does not classify accesses. */
   isWriteAccess: boolean;
 }
 
 export interface Location {
   file: string;
+  /** 1-based. */
   line: number;
+  /** 1-based. */
   column: number;
+  /** Set when the definition lands inside a known symbol. */
   symbolPath?: string;
 }
 
 export interface SearchResult {
   file: string;
+  /** 1-based. */
   line: number;
+  /** 1-based. */
   column: number;
   match: string;
+  /** Full line containing the match. */
   context: string;
 }
 
 export interface Diagnostic {
   file: string;
+  /** Zero-based, unlike the 1-based line/column elsewhere. */
   range: Range;
   message: string;
   severity: "error" | "warning" | "info" | "hint";
@@ -63,7 +75,9 @@ export interface WorkspaceSymbolInfo extends SymbolInfo {
 
 export interface WriteResult {
   file: string;
+  /** All files affected — rename can fan out to many. */
   filesChanged: string[];
+  /** Fresh diagnostics for the affected files; check for "error" severity. */
   diagnostics: Diagnostic[];
 }
 
@@ -366,12 +380,14 @@ export class LspApi {
     }
   }
 
+  /** File contents as a raw string (no line numbers). */
   async readFile(file: string): Promise<string> {
     const resolved = this.resolveWorkspacePath(file);
     await this.ensureReadyForBuffer();
     return this.readText(resolved);
   }
 
+  /** Source code of one symbol. Get exact symbolPath values from getSymbols. */
   async getSymbolBody(file: string, symbolPath: string): Promise<string> {
     const resolved = this.resolveWorkspacePath(file);
     await this.ensureReadyForBuffer();
@@ -395,6 +411,7 @@ export class LspApi {
     return text.slice(start, end);
   }
 
+  /** Document symbol tree (file outline). Every path is a usable handle. */
   async getSymbols(file: string): Promise<SymbolInfo[]> {
     const resolved = this.resolveWorkspacePath(file);
     await this.ensureReadyForBuffer();
@@ -402,6 +419,7 @@ export class LspApi {
     return buildSymbolInfoTree(await this.documentSymbols(resolved), text);
   }
 
+  /** Workspace-wide symbol search; paths are best-effort (confirm with getSymbols). */
   async findSymbol(query: string): Promise<WorkspaceSymbolInfo[]> {
     const symbols = await this.workspaceSymbolWithIndexWait(query);
     const mapped: WorkspaceSymbolInfo[] = [];
@@ -432,6 +450,7 @@ export class LspApi {
     return mapped;
   }
 
+  /** All references to a symbol across the workspace (incl. the declaration). */
   async findReferences(file: string, symbolPath: string): Promise<Reference[]> {
     const resolved = this.resolveWorkspacePath(file);
     const symbol = resolveSymbolPath({
@@ -466,6 +485,7 @@ export class LspApi {
     return references;
   }
 
+  /** Jump to a symbol's definition. */
   async goToDefinition(file: string, symbolPath: string): Promise<Location> {
     const resolved = this.resolveWorkspacePath(file);
     const symbol = resolveSymbolPath({
@@ -486,6 +506,7 @@ export class LspApi {
     return this.locationToApiLocation(first);
   }
 
+  /** Regex search across project files (respects .gitignore). */
   async searchText(pattern: string, glob?: string): Promise<SearchResult[]> {
     let regex: RegExp;
     try {
@@ -521,6 +542,7 @@ export class LspApi {
     return results;
   }
 
+  /** Project files matching a glob (respects .gitignore); no glob = all files. */
   async listFiles(glob?: string): Promise<string[]> {
     const matcher = globToRegExp(glob ?? "**/*");
     const files: string[] = [];
@@ -541,6 +563,7 @@ export class LspApi {
     return files.sort();
   }
 
+  /** Diagnostics for a file, or every file touched this session (not project-wide). */
   async getDiagnostics(file?: string): Promise<Diagnostic[]> {
     if (file) {
       const resolved = this.resolveWorkspacePath(file);
@@ -570,6 +593,7 @@ export class LspApi {
   // its edit through the buffer (didChange), then collects fresh diagnostics for
   // the affected files (≤2s wait) so the write-check-fix loop fits in one script.
 
+  /** Rename a symbol across the whole codebase (LSP rename). */
   async renameSymbol(
     file: string,
     symbolPath: string,
@@ -635,6 +659,7 @@ export class LspApi {
     return { file: resolved.relPath, filesChanged, diagnostics };
   }
 
+  /** Replace a symbol's full declaration with newText (pair with getSymbolBody). */
   async replaceSymbolBody(
     file: string,
     symbolPath: string,
@@ -646,6 +671,7 @@ export class LspApi {
     }));
   }
 
+  /** Insert code on its own line(s) directly above a symbol's declaration. */
   async insertBeforeSymbol(
     file: string,
     symbolPath: string,
@@ -663,6 +689,7 @@ export class LspApi {
     }));
   }
 
+  /** Insert code on its own line(s) directly below a symbol's declaration. */
   async insertAfterSymbol(
     file: string,
     symbolPath: string,
@@ -675,6 +702,7 @@ export class LspApi {
     }));
   }
 
+  /** Remove a symbol including its leading JSDoc/decorators. */
   async deleteSymbol(file: string, symbolPath: string): Promise<WriteResult> {
     const buffer = this.requireBuffer("deleteSymbol");
     const resolved = this.resolveWorkspacePath(file);
@@ -695,6 +723,7 @@ export class LspApi {
     };
   }
 
+  /** Create or overwrite a whole file (escape hatch for non-symbol edits). */
   async writeFile(file: string, content: string): Promise<WriteResult> {
     const buffer = this.requireBuffer("writeFile");
     const resolved = this.resolveWorkspacePath(file);
@@ -708,6 +737,7 @@ export class LspApi {
     };
   }
 
+  /** Delete a file. */
   async deleteFile(file: string): Promise<WriteResult> {
     const buffer = this.requireBuffer("deleteFile");
     const resolved = this.resolveWorkspacePath(file);
