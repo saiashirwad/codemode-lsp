@@ -104,7 +104,13 @@ script's last expression, JSON-serialized.
 
 - The last expression is the return value — end the script with the value you
   want back, e.g. \`({ count })\`.
+- Every \`lsp.*\` call returns a Promise — always \`await\` it. An un-awaited
+  call inside the result serializes as \`{}\`.
 - \`.filter()\`/\`.map()\` callbacks cannot be async — use \`for...of\` with \`await\`.
+- Globs match the whole workspace-relative path: \`listFiles("src/**")\` for a
+  directory (a bare directory name like \`"src"\` is treated as \`src/**\`),
+  \`listFiles()\` for every file. \`searchText\`'s second argument is a glob
+  string — there is no options object; filter results in your script.
 - Symbol paths are slash-separated (\`MyClass/myMethod\`); discover exact paths
   with \`getSymbols(file)\` rather than guessing.
 - File paths are relative to the workspace root; anything outside it is

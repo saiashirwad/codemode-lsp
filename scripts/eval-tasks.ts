@@ -85,6 +85,19 @@ export const EVAL_TASKS: EvalTask[] = [
     reference: ['await lsp.listFiles("src/**/*.ts");'],
   },
   {
+    id: "count-src-directory",
+    kind: "read",
+    prompt:
+      "How many files are in the src directory of this project? Give the exact number in your final answer.",
+    grade: (ctx) =>
+      hasWord(ctx.answer, "3")
+        ? ok("answer gives the correct count (3)")
+        : fail("answer does not give the count 3"),
+    // Deliberately uses the bare directory name — the call every observed
+    // session reached for first — to exercise the "src" ⇒ "src/**" DWIM.
+    reference: ['const files = await lsp.listFiles("src");\nfiles.length;'],
+  },
+  {
     id: "auth-service-outline",
     kind: "read",
     prompt:

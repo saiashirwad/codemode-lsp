@@ -37,6 +37,40 @@ describe("file listing and text search", () => {
     expect(globToRegExp("src/*.ts").test("src/nested/auth.ts")).toBe(false);
   });
 
+  test("a bare directory name lists everything under it (DWIM)", async () => {
+    const viaName = await api.listFiles("src");
+    const viaGlob = await api.listFiles("src/**");
+    expect(viaName).toEqual(viaGlob);
+    expect(viaName).toContain("src/auth.ts");
+    expect(await api.listFiles("src/")).toEqual(viaGlob);
+    expect(await api.listFiles("./src")).toEqual(viaGlob);
+  });
+
+  test('"", ".", and an in-root absolute path mean the whole workspace', async () => {
+    const all = await api.listFiles();
+    expect(await api.listFiles(".")).toEqual(all);
+    expect(await api.listFiles("")).toEqual(all);
+    expect(await api.listFiles(fixture.dir)).toEqual(all);
+    expect(await api.listFiles(join(fixture.dir, "src"))).toEqual(
+      await api.listFiles("src/**"),
+    );
+  });
+
+  test("a non-string glob throws instead of silently matching nothing", async () => {
+    await expect(
+      api.listFiles({ maxResults: 5 } as unknown as string),
+    ).rejects.toThrow(/glob.*must be strings/i);
+    await expect(
+      api.searchText("findUser", { maxResults: 5 } as unknown as string),
+    ).rejects.toThrow(/glob STRING.*no options object/s);
+  });
+
+  test("an absolute glob outside the root throws a containment error", async () => {
+    await expect(api.listFiles("/etc")).rejects.toThrow(
+      /outside the workspace root/,
+    );
+  });
+
   test("listFiles respects gitignore and hard exclusions", async () => {
     const files = await api.listFiles("**/*.ts");
     expect(files).toContain("src/auth.ts");

@@ -190,6 +190,20 @@ describe("non-serializable results", () => {
       runSandbox("const a = {}; a.self = a; a", { lsp: stubApi() }),
     ).rejects.toThrow(/circular references/);
   });
+
+  test("an un-awaited lsp call nested in the result names the path and suggests await", async () => {
+    // Observed failure mode: `{ files: lsp.listFiles() }` serializes as {} and
+    // the model debugs the wrong thing for several turns.
+    await expect(
+      runSandbox("({ files: lsp.listFiles() })", { lsp: stubApi() }),
+    ).rejects.toThrow(/Promise at "result\.files".*forget.*await/s);
+  });
+
+  test("an un-awaited call inside an array names the index", async () => {
+    await expect(
+      runSandbox("[lsp.readFile('a.ts')]", { lsp: stubApi() }),
+    ).rejects.toThrow(/Promise at "result\[0\]"/);
+  });
 });
 
 describe("timeout", () => {

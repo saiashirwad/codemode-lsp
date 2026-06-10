@@ -62,9 +62,9 @@ describe("eval tasks — reference solutions pass their graders", () => {
     return lastResult;
   }
 
-  test("task list shape: 15 tasks, unique ids, both kinds covered", () => {
-    expect(EVAL_TASKS).toHaveLength(15);
-    expect(new Set(EVAL_TASKS.map((task) => task.id)).size).toBe(15);
+  test("task list shape: 16 tasks, unique ids, both kinds covered", () => {
+    expect(EVAL_TASKS).toHaveLength(16);
+    expect(new Set(EVAL_TASKS.map((task) => task.id)).size).toBe(16);
     expect(EVAL_TASKS.some((task) => task.kind === "read")).toBe(true);
     expect(EVAL_TASKS.some((task) => task.kind === "write")).toBe(true);
   });

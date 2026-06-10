@@ -1,4 +1,10 @@
-import { existsSync, readdirSync, readFileSync, realpathSync } from "node:fs";
+import {
+  existsSync,
+  readdirSync,
+  readFileSync,
+  realpathSync,
+  statSync,
+} from "node:fs";
 import { dirname, isAbsolute, relative, resolve, sep } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import type {
@@ -506,8 +512,15 @@ export class LspApi {
     return this.locationToApiLocation(first);
   }
 
-  /** Regex search across project files (respects .gitignore). */
+  /** Regex search across project files; optional second arg is a glob string. */
   async searchText(pattern: string, glob?: string): Promise<SearchResult[]> {
+    if (glob !== undefined && glob !== null && typeof glob !== "string") {
+      // Observed failure mode: scripts invent an options object here, which
+      // would otherwise silently match nothing.
+      throw new Error(
+        'searchText(pattern, glob?) takes a glob STRING as its second argument, e.g. searchText("TODO", "src/**"). There is no options object — filter or slice the returned array in your script instead.',
+      );
+    }
     let regex: RegExp;
     try {
       regex = new RegExp(pattern, "g");
@@ -542,9 +555,46 @@ export class LspApi {
     return results;
   }
 
-  /** Project files matching a glob (respects .gitignore); no glob = all files. */
+  /**
+   * Normalize a listFiles/searchText glob (LLM-facing DWIM, from observed
+   * sessions): non-strings throw instead of silently matching nothing; ""/"."
+   * mean the whole workspace; absolute paths inside the root become relative;
+   * and a wildcard-free path naming an existing directory becomes "dir/**" —
+   * `listFiles("src")` always means `listFiles("src/**")`.
+   */
+  private normalizeGlob(glob: unknown): string {
+    if (glob === undefined || glob === null) return "**/*";
+    if (typeof glob !== "string") {
+      throw new Error(
+        `listFiles/searchText globs must be strings like "src/**/*.ts" (got ${typeof glob}). Omit the glob to cover every file.`,
+      );
+    }
+    let candidate = glob.trim();
+    if (candidate.startsWith("./")) candidate = candidate.slice(2);
+    while (candidate.endsWith("/")) candidate = candidate.slice(0, -1);
+    if (candidate === "" || candidate === ".") return "**/*";
+    if (isAbsolute(candidate)) {
+      const rel = relative(this.rootDir, resolve(candidate));
+      if (rel === "") return "**/*";
+      if (rel.startsWith("..") || isAbsolute(rel)) {
+        throw new Error(
+          `Glob "${glob}" points outside the workspace root. Use a workspace-relative pattern like "src/**".`,
+        );
+      }
+      candidate = toPosixPath(rel);
+    }
+    if (!/[*?[\]{}]/.test(candidate)) {
+      const abs = resolve(this.rootDir, candidate);
+      if (existsSync(abs) && statSync(abs).isDirectory()) {
+        return `${candidate}/**`;
+      }
+    }
+    return candidate;
+  }
+
+  /** Project files matching a glob; no glob = all files, a directory name means everything under it. */
   async listFiles(glob?: string): Promise<string[]> {
-    const matcher = globToRegExp(glob ?? "**/*");
+    const matcher = globToRegExp(this.normalizeGlob(glob));
     const files: string[] = [];
     const visit = (dir: string) => {
       for (const entry of readdirSync(dir, { withFileTypes: true })) {

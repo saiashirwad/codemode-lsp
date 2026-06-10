@@ -278,11 +278,50 @@ function capText(text: string, cap: number, marker: string): string {
 }
 
 /**
+ * Find the first un-awaited Promise nested inside the result and return its
+ * path, or null. Duck-typed (`.then`) because sandbox-realm Promises fail an
+ * `instanceof Promise` check in the host realm. The top-level value is already
+ * auto-awaited by the runner; this catches Promises inside objects/arrays,
+ * which would otherwise JSON-serialize as `{}` — a silent, undiagnosable
+ * footgun observed in real sessions.
+ */
+function findThenablePath(
+  value: unknown,
+  path: string,
+  seen: Set<object>,
+): string | null {
+  if (value === null || typeof value !== "object") return null;
+  if (typeof (value as { then?: unknown }).then === "function") return path;
+  if (seen.has(value)) return null;
+  seen.add(value);
+  if (Array.isArray(value)) {
+    for (let i = 0; i < value.length; i += 1) {
+      const found = findThenablePath(value[i], `${path}[${i}]`, seen);
+      if (found) return found;
+    }
+    return null;
+  }
+  for (const [key, child] of Object.entries(value)) {
+    const found = findThenablePath(child, `${path}.${key}`, seen);
+    if (found) return found;
+  }
+  return null;
+}
+
+/**
  * JSON-serialize the final value. Non-serializable values (functions, circular
  * references) throw an LLM-targeted error explaining what to return instead.
  */
 function serializeResult(value: unknown): string {
   if (value === undefined) return "undefined";
+  const thenableAt = findThenablePath(value, "result", new Set());
+  if (thenableAt !== null) {
+    throw new Error(
+      `Script result contains a Promise at "${thenableAt}" — did you forget ` +
+        "await? Every lsp.* function is async; write e.g. " +
+        '`const files = await lsp.listFiles("src/**");`.',
+    );
+  }
   if (typeof value === "function") {
     throw new Error(
       "Script returned a function, which cannot be serialized. Return a " +
