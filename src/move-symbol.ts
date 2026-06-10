@@ -174,6 +174,80 @@ export function renderImportHeader(imports: HeaderImport[]): string {
   return lines.join("\n");
 }
 
+/** All local names bound by the file's import declarations. */
+export function importBindingNames(
+  fileName: string,
+  sourceText: string,
+): Set<string> {
+  const sourceFile = parse(fileName, sourceText);
+  const names = new Set<string>();
+  for (const statement of sourceFile.statements) {
+    if (!ts.isImportDeclaration(statement)) continue;
+    const clause = statement.importClause;
+    if (!clause) continue;
+    if (clause.name) names.add(clause.name.text);
+    const named = clause.namedBindings;
+    if (named && ts.isNamespaceImport(named)) names.add(named.name.text);
+    if (named && ts.isNamedImports(named)) {
+      for (const element of named.elements) names.add(element.name.text);
+    }
+  }
+  return names;
+}
+
+/**
+ * Remove the imported binding of `name` from every import declaration whose
+ * specifier matches `isModule` — used when a symbol moves INTO a file that
+ * previously imported it (the import would collide with the new local
+ * definition). Sole-binding declarations are removed whole, shared ones lose
+ * just the element.
+ */
+export function removeImportOfName(params: {
+  fileName: string;
+  sourceText: string;
+  name: string;
+  isModule: (specifier: string) => boolean;
+}): { text: string; changed: boolean } {
+  const sourceFile = parse(params.fileName, params.sourceText);
+  const splices: Array<{ start: number; end: number }> = [];
+  for (const statement of sourceFile.statements) {
+    if (!ts.isImportDeclaration(statement)) continue;
+    if (!ts.isStringLiteral(statement.moduleSpecifier)) continue;
+    if (!params.isModule(statement.moduleSpecifier.text)) continue;
+    const clause = statement.importClause;
+    const named = clause?.namedBindings;
+    if (!clause || !named || !ts.isNamedImports(named)) continue;
+    const element = named.elements.find(
+      (candidate) => candidate.name.text === params.name,
+    );
+    if (!element) continue;
+    if (named.elements.length === 1 && !clause.name) {
+      // Sole binding: drop the whole declaration including its newline.
+      const start = statement.getStart(sourceFile);
+      let end = statement.getEnd();
+      if (params.sourceText[end] === "\n") end += 1;
+      splices.push({ start, end });
+    } else {
+      const elements = named.elements;
+      const index = elements.indexOf(element);
+      const next = elements[index + 1];
+      const previous = elements[index - 1];
+      const start = next
+        ? element.getStart(sourceFile)
+        : (previous?.getEnd() ?? element.getStart(sourceFile));
+      const end = next ? next.getStart(sourceFile) : element.getEnd();
+      splices.push({ start, end });
+    }
+  }
+  if (splices.length === 0) return { text: params.sourceText, changed: false };
+  splices.sort((a, b) => b.start - a.start);
+  let text = params.sourceText;
+  for (const splice of splices) {
+    text = text.slice(0, splice.start) + text.slice(splice.end);
+  }
+  return { text, changed: true };
+}
+
 /** Names among `names` declared at top level as type-only constructs (interface/type alias). */
 export function topLevelTypeNames(
   fileName: string,

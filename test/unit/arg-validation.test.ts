@@ -100,6 +100,21 @@ describe("lsp.* argument validation", () => {
     );
   });
 
+  test("moveSymbols rejects a non-array or empty symbolPaths with an example", async () => {
+    await expect(
+      api.moveSymbols(
+        "src/auth.ts",
+        "Token" as unknown as string[],
+        "src/t.ts",
+      ),
+    ).rejects.toThrow(
+      /moveSymbols\(file, symbolPaths, targetFile\).*non-empty array.*Example/s,
+    );
+    await expect(
+      api.moveSymbols("src/auth.ts", [], "src/t.ts"),
+    ).rejects.toThrow(/non-empty array/);
+  });
+
   test("organizeImports and addMissingImports reject non-string files", async () => {
     await expect(
       api.organizeImports(undefined as unknown as string),

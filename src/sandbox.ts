@@ -3,8 +3,12 @@ import vm from "node:vm";
 import { parse as acornParse } from "acorn";
 import type { LspApi } from "./lsp-api";
 
-/** Default script timeout (ms). Overridable via the sandbox options / CODEMODE_TIMEOUT_MS. */
-export const DEFAULT_TIMEOUT_MS = 30_000;
+/**
+ * Default script timeout (ms). Overridable via the sandbox options /
+ * CODEMODE_TIMEOUT_MS. 60s, not 30s: a field run's legitimate 7-symbol
+ * extraction (moves + organize + checkProject) was rolled back at 30s.
+ */
+export const DEFAULT_TIMEOUT_MS = 60_000;
 
 /** Hard cap on the serialized result, in characters (PRD § Result size cap). */
 export const RESULT_CHAR_CAP = 50_000;
@@ -101,6 +105,7 @@ export const WRITE_OP_NAMES = [
   "writeFile",
   "deleteFile",
   "moveSymbol",
+  "moveSymbols",
   "organizeImports",
   "addMissingImports",
 ] as const;

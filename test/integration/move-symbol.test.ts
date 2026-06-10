@@ -118,6 +118,83 @@ describe("moveSymbol (integration)", () => {
   );
 
   test(
+    "moveSymbols batch: shared dependencies are imported once (field bug: Duplicate identifier)",
+    async () => {
+      // Two functions sharing both an import dep (findUser) and a type dep
+      // (User) — the exact shape that produced "Duplicate identifier
+      // 'PaymentAccountRecord'" in the field when moved sequentially.
+      writeFileSync(
+        join(fixture.dir, "src/pair.ts"),
+        [
+          'import { findUser, type User } from "./users";',
+          "",
+          "export function lookupA(id: string): User | undefined {",
+          "  return findUser(id);",
+          "}",
+          "",
+          "export function lookupB(id: string): User | undefined {",
+          "  return findUser(id);",
+          "}",
+          "",
+        ].join("\n"),
+      );
+      const buffer = api.beginTransaction();
+      const result = await api.moveSymbols(
+        "src/pair.ts",
+        ["lookupA", "lookupB"],
+        "src/moved-pair.ts",
+      );
+      expect(result.filesChanged).toContain("src/moved-pair.ts");
+      const target =
+        buffer.peekText(join(fixture.dir, "src/moved-pair.ts")) ?? "";
+      // One import declaration from ./users, each name bound exactly once.
+      expect((target.match(/from "\.\/users"/g) ?? []).length).toBe(1);
+      expect(
+        (target.match(/\bfindUser\b/g) ?? []).filter(Boolean).length,
+      ).toBeGreaterThan(0);
+      const importLines = target
+        .split("\n")
+        .filter((line) => line.startsWith("import"));
+      expect(importLines.join("\n").match(/findUser/g)?.length).toBe(1);
+      const check = await api.checkProject();
+      expect(
+        check.diagnostics.filter((d) => d.file !== "src/broken.ts"),
+      ).toEqual([]);
+      api.endTransaction();
+    },
+    { timeout: 60_000 },
+  );
+
+  test(
+    "moving a symbol into a file that already imports it drops the stale import",
+    async () => {
+      const buffer = api.beginTransaction();
+      // consumer.ts imports createAuthMiddleware from ./auth; move the symbol
+      // INTO consumer.ts — the old import would collide with the definition.
+      const result = await api.moveSymbol(
+        "src/auth.ts",
+        "createAuthMiddleware",
+        "src/consumer.ts",
+      );
+      const consumer =
+        buffer.peekText(join(fixture.dir, "src/consumer.ts")) ?? "";
+      expect(consumer).toContain("export function createAuthMiddleware");
+      // The binding is no longer imported anywhere in consumer.ts.
+      const importLines = consumer
+        .split("\n")
+        .filter((line) => line.startsWith("import"));
+      expect(importLines.join("\n")).not.toContain("createAuthMiddleware");
+      expect(result.filesChanged).toContain("src/consumer.ts");
+      const check = await api.checkProject();
+      expect(
+        check.diagnostics.filter((d) => d.file !== "src/broken.ts"),
+      ).toEqual([]);
+      api.endTransaction();
+    },
+    { timeout: 60_000 },
+  );
+
+  test(
     "nested symbols are rejected with the top-level rule spelled out",
     async () => {
       api.beginTransaction();

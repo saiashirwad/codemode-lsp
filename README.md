@@ -46,7 +46,7 @@ cannot write to.
 | --- | --- |
 | read | `readFile`, `getSymbols` (pass `1` as depth for top level only), `getSymbolBody`, `findSymbol`, `findReferences`, `goToDefinition`, `incomingCalls`, `outgoingCalls` (true calls only), `getDependencies` (what a symbol's body needs from outside itself), `searchText`, `listFiles`, `getDiagnostics` |
 | verify | `checkProject` — whole-project type check over the *buffered* state; path aliases resolve even in files created mid-script |
-| write | `moveSymbol` (full move: imports computed, importers repointed, source pruned), `organizeImports`, `addMissingImports`, `renameSymbol`, `replaceSymbolBody`, `insertBeforeSymbol`, `insertAfterSymbol`, `deleteSymbol`, `writeFile`, `deleteFile` |
+| write | `moveSymbol` / `moveSymbols` (full move, single or batch: imports computed and deduped, importers repointed, source pruned), `organizeImports`, `addMissingImports`, `renameSymbol`, `replaceSymbolBody`, `insertBeforeSymbol`, `insertAfterSymbol`, `deleteSymbol`, `writeFile`, `deleteFile` |
 
 The tool returns `{ result, logs, changes }`. Symbols are addressed as
 `(file, "MyClass/myMethod")` pairs discovered via `getSymbols`. Full type
@@ -59,7 +59,7 @@ See `PRD.md` for the complete spec and decision log.
 
 | Variable | Default | Effect |
 | --- | --- | --- |
-| `CODEMODE_TIMEOUT_MS` | `30000` | Script timeout |
+| `CODEMODE_TIMEOUT_MS` | `60000` | Script timeout |
 | `CODEMODE_LSP_BIN` | bundled server | Language server command |
 | `CODEMODE_READONLY` | unset | `1`/`true` removes the write ops entirely |
 

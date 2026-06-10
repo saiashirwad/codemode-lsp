@@ -2,8 +2,10 @@ import { describe, expect, test } from "bun:test";
 import {
   addExportModifiers,
   aliasMapsFromPaths,
+  importBindingNames,
   namesUsedOutsideImports,
   relativeSpecifier,
+  removeImportOfName,
   renderImportHeader,
   rewireMovedImport,
   rewriteSpecifier,
@@ -148,6 +150,54 @@ describe("namesUsedOutsideImports", () => {
     const used = namesUsedOutsideImports("f.ts", source, ["gone", "kept"]);
     expect(used.has("kept")).toBe(true);
     expect(used.has("gone")).toBe(false);
+  });
+});
+
+describe("importBindingNames", () => {
+  test("collects default, namespace, and named bindings", () => {
+    const names = importBindingNames(
+      "f.ts",
+      [
+        'import def from "./a";',
+        'import * as ns from "./b";',
+        'import { x, type Y } from "./c";',
+        "const local = 1;",
+      ].join("\n"),
+    );
+    expect([...names].sort()).toEqual(["Y", "def", "ns", "x"]);
+  });
+});
+
+describe("removeImportOfName", () => {
+  test("sole binding: removes the whole declaration and its newline", () => {
+    const result = removeImportOfName({
+      fileName: "f.ts",
+      sourceText: 'import { moved } from "./old";\nconst x = 1;\n',
+      name: "moved",
+      isModule: (specifier) => specifier === "./old",
+    });
+    expect(result.changed).toBe(true);
+    expect(result.text).toBe("const x = 1;\n");
+  });
+
+  test("shared declaration: removes just the element", () => {
+    const result = removeImportOfName({
+      fileName: "f.ts",
+      sourceText: 'import { a, moved } from "./old";\n',
+      name: "moved",
+      isModule: (specifier) => specifier === "./old",
+    });
+    expect(result.text).toBe('import { a } from "./old";\n');
+  });
+
+  test("non-matching modules are untouched", () => {
+    const result = removeImportOfName({
+      fileName: "f.ts",
+      sourceText: 'import { moved } from "./elsewhere";\n',
+      name: "moved",
+      isModule: () => false,
+    });
+    expect(result.changed).toBe(false);
   });
 });
 

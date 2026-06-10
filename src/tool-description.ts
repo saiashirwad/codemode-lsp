@@ -147,13 +147,21 @@ script's last expression, JSON-serialized.
   \`searchText("new NotFoundError\\\\(")\`.
 - To trace calls, use \`incomingCalls\`/\`outgoingCalls\` — they return only TRUE
   calls, attributed to the enclosing function. \`findReferences\` mixes calls
-  with imports, re-exports, and type references.
+  with imports, re-exports, and type references. Call hierarchy works on
+  CALLABLE symbols only (functions/methods/constructors) — for types,
+  variables, and constants use \`findReferences\`/\`getDependencies\` instead.
 - Moving code? \`moveSymbol(file, symbolPath, targetFile)\` moves a TOP-LEVEL
   symbol end to end: target imports computed, importers repointed, source
-  imports pruned — don't hand-splice what it can do in one call. For custom
-  splits, \`getDependencies(file, symbolPath)\` computes what a symbol's body
-  needs from outside itself (required imports + same-file helpers), and
+  imports pruned — don't hand-splice what it can do in one call. Extracting a
+  CLUSTER? Use \`moveSymbols(file, [...paths], targetFile)\` (dependency order:
+  types/helpers first) — one batch is several times faster than per-symbol
+  calls. For custom splits, \`getDependencies(file, symbolPath)\` computes what
+  a symbol's body needs from outside itself, and
   \`organizeImports\`/\`addMissingImports\` clean up import blocks natively.
+- Keep MUTATING scripts lean: do discovery in one execute call, then a tight
+  script that does the writes plus ONE final \`checkProject()\`. Per-move
+  diagnostics, baseline checks, and redundant \`addMissingImports\` calls burn
+  the script timeout — writes already roll back atomically on failure.
 - \`goToDefinition\` only addresses symbols DEFINED in the given file — it cannot
   follow an imported or called name into another module. To resolve a name to
   its definition anywhere in the workspace, use \`findSymbol(name)\` and filter

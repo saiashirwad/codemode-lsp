@@ -30,8 +30,10 @@ import {
   EMPTY_ALIAS_MAPS,
   ensureTopLevelExport,
   type HeaderImport,
+  importBindingNames,
   namesUsedOutsideImports,
   relativeSpecifier,
+  removeImportOfName,
   renderImportHeader,
   rewireMovedImport,
   rewriteSpecifier,
@@ -1184,7 +1186,7 @@ export class LspApi {
     return this.runSourceAction(file, [["source.addMissingImports.ts"]]);
   }
 
-  /** Move a TOP-LEVEL symbol to another file (created if missing): brings its JSDoc, computes the target's imports, back-imports if the source still uses it, repoints every importer (alias-aware), and prunes the source's now-unused imports. The moved symbol becomes exported. */
+  /** Move a TOP-LEVEL symbol to another file (created if missing): brings its JSDoc, computes the target's imports (deduped against what it already imports), back-imports if the source still uses it, repoints every importer (alias-aware), and prunes the source's now-unused imports. The moved symbol becomes exported. Moving a whole cluster? moveSymbols is much faster. */
   async moveSymbol(
     file: string,
     symbolPath: string,
@@ -1195,6 +1197,37 @@ export class LspApi {
       'await lsp.moveSymbol("src/commands.ts", "loadSnapshot", "src/snapshot.ts")',
       { file, symbolPath, targetFile },
     );
+    return this.moveSymbolsImpl(file, [symbolPath], targetFile);
+  }
+
+  /** Move several TOP-LEVEL symbols from one file to another in one pass (list them in dependency order: types/helpers first). Same per-symbol behavior as moveSymbol, but imports/cleanups/diagnostics are handled once for the whole batch — the fast path for extracting a cluster. */
+  async moveSymbols(
+    file: string,
+    symbolPaths: string[],
+    targetFile: string,
+  ): Promise<MoveSymbolResult> {
+    this.requireStrings(
+      "moveSymbols(file, symbolPaths, targetFile)",
+      'await lsp.moveSymbols("src/commands.ts", ["Snapshot", "loadSnapshot"], "src/snapshot.ts")',
+      { file, targetFile },
+    );
+    if (
+      !Array.isArray(symbolPaths) ||
+      symbolPaths.length === 0 ||
+      symbolPaths.some((p) => typeof p !== "string" || p.length === 0)
+    ) {
+      throw new Error(
+        `moveSymbols(file, symbolPaths, targetFile): "symbolPaths" must be a non-empty array of symbol-path strings but got ${JSON.stringify(symbolPaths)}. Example: await lsp.moveSymbols("src/commands.ts", ["Snapshot", "loadSnapshot"], "src/snapshot.ts")`,
+      );
+    }
+    return this.moveSymbolsImpl(file, symbolPaths, targetFile);
+  }
+
+  private async moveSymbolsImpl(
+    file: string,
+    symbolPaths: string[],
+    targetFile: string,
+  ): Promise<MoveSymbolResult> {
     const buffer = this.requireBuffer("moveSymbol");
     const source = this.resolveWorkspacePath(file);
     const target = this.resolveWorkspacePath(targetFile);
@@ -1209,6 +1242,55 @@ export class LspApi {
       );
     }
     await this.client.ensureAlive();
+    const aliases = this.loadAliasMaps();
+    const targetExistedBefore =
+      !buffer.isDeleted(target.absPath) &&
+      (buffer.peekText(target.absPath) !== undefined ||
+        existsSync(target.absPath));
+
+    const touched = new Set<string>([source.absPath, target.absPath]);
+    const autoExported = new Set<string>();
+    for (const symbolPath of symbolPaths) {
+      const moved = await this.moveOneSymbol(
+        buffer,
+        source,
+        target,
+        symbolPath,
+        aliases,
+      );
+      for (const absPath of moved.touched) touched.add(absPath);
+      for (const name of moved.autoExported) autoExported.add(name);
+    }
+
+    // Native cleanups ONCE for the whole batch: drop the source imports the
+    // moved bodies took with them; merge the prepended headers into a
+    // pre-existing target's import block. (Per-batch, not per-move — a field
+    // run burned its 30s timeout on per-move cleanup round trips.)
+    await this.applyCodeActionEdits(source, ["source.removeUnusedImports.ts"]);
+    if (targetExistedBefore) {
+      await this.applyCodeActionEdits(target, ["source.organizeImports.ts"]);
+    }
+
+    const touchedList = [...touched];
+    const diagnostics = await this.collectDiagnostics(touchedList);
+    return {
+      file: source.relPath,
+      filesChanged: touchedList
+        .map((absPath) => this.relPathFor(absPath))
+        .sort(),
+      diagnostics,
+      autoExported: [...autoExported].sort(),
+    };
+  }
+
+  /** Move one top-level symbol; analysis-then-mutation, no cleanups/diagnostics. */
+  private async moveOneSymbol(
+    buffer: TransactionalBuffer,
+    source: ResolvedWorkspacePath,
+    target: ResolvedWorkspacePath,
+    symbolPath: string,
+    aliases: AliasMaps,
+  ): Promise<{ touched: string[]; autoExported: string[] }> {
     const text = this.readText(source);
     const symbols = await this.documentSymbols(source);
     const symbol = resolveSymbolPath({
@@ -1263,11 +1345,38 @@ export class LspApi {
       movedName,
     );
 
-    const aliases = this.loadAliasMaps();
     const typeNames = topLevelTypeNames(source.relPath, text, [
       ...deps.sameFile,
       movedName,
     ]);
+
+    // Current target state: needed to dedupe the header (field run: two moved
+    // functions sharing a dependency produced "Duplicate identifier") and to
+    // drop a pre-existing import of the moved symbol from the source module
+    // (it would collide with the arriving definition).
+    const targetExisted =
+      !buffer.isDeleted(target.absPath) &&
+      (buffer.peekText(target.absPath) !== undefined ||
+        existsSync(target.absPath));
+    let targetText = targetExisted ? this.readText(target) : undefined;
+    if (targetText !== undefined) {
+      targetText = removeImportOfName({
+        fileName: target.relPath,
+        sourceText: targetText,
+        name: movedName,
+        isModule: (specifier) =>
+          specifierResolvesTo(
+            specifier,
+            target.relPath,
+            source.relPath,
+            aliases,
+          ),
+      }).text;
+    }
+    const existingTargetBindings =
+      targetText !== undefined
+        ? importBindingNames(target.relPath, targetText)
+        : new Set<string>();
 
     // Construct the target's import header deterministically from the
     // dependency analysis — no auto-import involved, so it works identically
@@ -1284,6 +1393,9 @@ export class LspApi {
       return bucket;
     };
     for (const dependency of deps.imports) {
+      // Already bound in the target (e.g. an earlier move in this batch
+      // brought it) — adding it again is the duplicate-identifier bug.
+      if (existingTargetBindings.has(dependency.name)) continue;
       const specifier = rewriteSpecifier(
         dependency.from,
         source.relPath,
@@ -1300,10 +1412,13 @@ export class LspApi {
         dependency.name,
       );
     }
-    if (deps.sameFile.length > 0) {
+    const neededSameFile = deps.sameFile.filter(
+      (name) => !existingTargetBindings.has(name),
+    );
+    if (neededSameFile.length > 0) {
       const fromSource = relativeSpecifier(target.relPath, source.relPath);
       const bucket = bucketFor(fromSource);
-      for (const name of deps.sameFile) {
+      for (const name of neededSameFile) {
         (typeNames.has(name) ? bucket.typeOnlyNames : bucket.names).push(name);
       }
     }
@@ -1312,13 +1427,10 @@ export class LspApi {
     );
     const header = renderImportHeader(headerImports);
 
-    const targetExisted =
-      !buffer.isDeleted(target.absPath) &&
-      (buffer.peekText(target.absPath) !== undefined ||
-        existsSync(target.absPath));
-    const newTargetText = targetExisted
-      ? `${header ? `${header}\n` : ""}${this.readText(target).trimEnd()}\n\n${movedText}`
-      : `${header ? `${header}\n\n` : ""}${movedText}`;
+    const newTargetText =
+      targetText !== undefined
+        ? `${header ? `${header}\n` : ""}${targetText.trimEnd()}\n\n${movedText}`
+        : `${header ? `${header}\n\n` : ""}${movedText}`;
 
     // Source: cut the block, auto-export stayed-behind dependencies, add a
     // back-import when the remaining code still uses the moved symbol.
@@ -1343,13 +1455,6 @@ export class LspApi {
 
     buffer.writeFile(target.absPath, newTargetText);
     buffer.writeFile(source.absPath, newSourceText);
-    // Native cleanups: drop the source imports the moved body took with it;
-    // merge the prepended header into a pre-existing target's import block.
-    // Both files exist on disk here, so the configured project serves them.
-    await this.applyCodeActionEdits(source, ["source.removeUnusedImports.ts"]);
-    if (targetExisted) {
-      await this.applyCodeActionEdits(target, ["source.organizeImports.ts"]);
-    }
 
     // Repoint every importer, preserving its specifier style (alias importers
     // stay on the alias when the target maps onto one).
@@ -1380,12 +1485,8 @@ export class LspApi {
       }
     }
 
-    const touched = [source.absPath, target.absPath, ...changedReferencers];
-    const diagnostics = await this.collectDiagnostics(touched);
     return {
-      file: source.relPath,
-      filesChanged: touched.map((absPath) => this.relPathFor(absPath)).sort(),
-      diagnostics,
+      touched: [source.absPath, target.absPath, ...changedReferencers],
       autoExported: exportResult.exported,
     };
   }
@@ -1442,8 +1543,10 @@ export class LspApi {
     // Auto-import (and unused-detection) need tsserver's project semantics,
     // which warm up shortly after open — retry briefly before trusting an
     // empty answer, since "no action" is also the legitimate no-op result.
+    // Capped at 3: a field run's addMissingImports on a big file compounded
+    // each retry with a whole-project export scan and ate into the timeout.
     let affected = await applyRounds();
-    for (let attempt = 0; attempt < 6 && affected.length === 0; attempt += 1) {
+    for (let attempt = 0; attempt < 3 && affected.length === 0; attempt += 1) {
       await new Promise((resolve) => setTimeout(resolve, 500));
       affected = await applyRounds();
     }
