@@ -1,7 +1,7 @@
 {
   "name": "codemode-lsp",
-  "version": "0.2.1",
-  "description": "MCP server exposing a single code-mode tool backed by LSP",
+  "version": "0.3.0",
+  "description": "Semantic code intelligence + refactoring MCP for TypeScript/JS: one LSP-backed execute tool — call graphs, impact analysis, symbol dependencies, atomic multi-file refactors",
   "keywords": [
     "mcp",
     "lsp",

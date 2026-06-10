@@ -98,7 +98,11 @@ export function renderLspTypes(readonly: boolean): string {
   return `declare const lsp: {\n${ops}\n};\n\n${interfaces}`;
 }
 
-const TEMPLATE = `Execute JavaScript to perform semantic code operations via LSP (TypeScript).
+const TEMPLATE = `Semantic code intelligence and refactoring for TypeScript/JavaScript (LSP-backed).
+Best for codebase-WIDE questions and edits: impact analysis ("what breaks if I
+change X"), call graphs, usage audits, and atomic multi-file refactors — it
+RESOLVES names where grep only matches text, in one call instead of many
+search/read round trips. For a single-file peek, plain file reads are cheaper.
 If this description looks truncated, run the script \`await lsp.help()\` — it
 returns this complete reference. Ops — {{opInventory}}.
 
@@ -133,6 +137,9 @@ script's last expression, JSON-serialized.
 - To trace calls, use \`incomingCalls\`/\`outgoingCalls\` — they return only TRUE
   calls, attributed to the enclosing function. \`findReferences\` mixes calls
   with imports, re-exports, and type references.
+- Planning to move or split code? \`getDependencies(file, symbolPath)\` computes
+  what a symbol's body needs from outside itself — its required imports and
+  same-file helpers — so you never reverse-engineer the import header.
 - \`goToDefinition\` only addresses symbols DEFINED in the given file — it cannot
   follow an imported or called name into another module. To resolve a name to
   its definition anywhere in the workspace, use \`findSymbol(name)\` and filter

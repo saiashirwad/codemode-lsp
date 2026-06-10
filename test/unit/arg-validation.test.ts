@@ -71,6 +71,13 @@ describe("lsp.* argument validation", () => {
     );
   });
 
+  test("getDependencies with a missing symbolPath names the signature", async () => {
+    // @ts-expect-error deliberate wrong arity
+    await expect(api.getDependencies("src/auth.ts")).rejects.toThrow(
+      /getDependencies\(file, symbolPath\).*"symbolPath".*missing argument/s,
+    );
+  });
+
   test("outgoingCalls rejects a non-string file", async () => {
     await expect(
       api.outgoingCalls(7 as unknown as string, "recordPayment"),

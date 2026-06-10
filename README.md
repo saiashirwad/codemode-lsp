@@ -1,8 +1,16 @@
 # codemode-lsp
 
-An MCP server exposing a **single `execute` tool** backed by LSP. The LLM
+Semantic code intelligence and refactoring for TypeScript/JavaScript agents:
+an MCP server exposing a **single `execute` tool** backed by LSP. The LLM
 writes JavaScript that chains semantic code operations (`lsp.*`), executed in a
 sandbox with transactional write semantics.
+
+It shines on **codebase-wide** work that grep-based agents reconstruct by hand
+and get subtly wrong: impact analysis ("what breaks if I change X"), call
+graphs, usage audits, refactor planning, and atomic multi-file edits — names
+are *resolved*, not text-matched, and a whole analysis runs in one round trip.
+For a single-file lookup, an agent's plain file reads are cheaper; this is the
+tool you reach for when the answer spans files.
 
 LLMs are better at writing code than orchestrating tool calls. Instead of
 filtering, looping, and branching in natural language across many round-trips,
@@ -65,14 +73,17 @@ returns `{ result, logs, changes }`:
 - **changes** — every file that hit disk, as `{ file, kind, diff }` with a
   unified diff against the pre-script content. Empty for read-only scripts.
 
-The API surface is 18 functions plus `getDiagnostics`: 10 read ops (`readFile`,
+The API surface is 19 functions plus `getDiagnostics`: 11 read ops (`readFile`,
 `getSymbolBody`, `getSymbols`, `findSymbol`, `findReferences`,
-`goToDefinition`, `incomingCalls`, `outgoingCalls`, `searchText`, `listFiles`)
-and 7 write ops (`renameSymbol`, `replaceSymbolBody`, `insertBeforeSymbol`,
-`insertAfterSymbol`, `deleteSymbol`, `writeFile`, `deleteFile`). The call
-hierarchy ops return only true calls — attributed to the enclosing function,
-resolved across modules — where `findReferences` mixes calls with imports and
-re-exports. Symbols are addressed by
+`goToDefinition`, `incomingCalls`, `outgoingCalls`, `getDependencies`,
+`searchText`, `listFiles`) and 7 write ops (`renameSymbol`,
+`replaceSymbolBody`, `insertBeforeSymbol`, `insertAfterSymbol`,
+`deleteSymbol`, `writeFile`, `deleteFile`). The call hierarchy ops return only
+true calls — attributed to the enclosing function, resolved across modules —
+where `findReferences` mixes calls with imports and re-exports.
+`getDependencies` computes what a symbol's body needs from outside itself
+(used imports with their modules and type-only flags, plus same-file helpers),
+so moving a symbol to a new file is a computation, not an eyeballing exercise. Symbols are addressed by
 slash-separated paths (`MyClass/myMethod`) discovered via `getSymbols`. The
 full type definitions are embedded in the tool description, generated straight
 from the source (`bun run generate:types`). If a client truncates the

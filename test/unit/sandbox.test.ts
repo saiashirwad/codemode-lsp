@@ -127,6 +127,17 @@ describe("runSandbox surface", () => {
     expect(parsed.viaLsp).toBe("undefined");
   });
 
+  test("Date.now and Math.random work (a field report claimed they throw — they don't)", async () => {
+    const { result } = await runSandbox(
+      "({ now: typeof Date.now(), rand: typeof Math.random(), iso: new Date(0).toISOString() })",
+      { lsp: stubApi() },
+    );
+    const parsed = JSON.parse(result);
+    expect(parsed.now).toBe("number");
+    expect(parsed.rand).toBe("number");
+    expect(parsed.iso).toBe("1970-01-01T00:00:00.000Z");
+  });
+
   test("JS builtins (JSON/Math/Map) are present", async () => {
     const { result } = await runSandbox(
       "JSON.stringify({ m: Math.max(1, 2), size: new Map([['a',1]]).size })",

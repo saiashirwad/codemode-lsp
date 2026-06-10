@@ -184,4 +184,32 @@ describe("LspApi read operations (integration)", () => {
       api.readFile(join(sampleFixtureDir, "..", "outside.ts")),
     ).rejects.toThrow(/outside the workspace root/);
   });
+
+  test(
+    "getDependencies lists used imports and same-file helpers — the move computation",
+    async () => {
+      // createAuthMiddleware uses findUser (value import) but not User (type
+      // import from the same declaration), plus same-file AuthService + Token.
+      const middleware = await api.getDependencies(
+        "src/auth.ts",
+        "createAuthMiddleware",
+      );
+      expect(middleware.imports).toEqual([
+        { name: "findUser", from: "./users", typeOnly: false },
+      ]);
+      expect(middleware.sameFile).toEqual(["AuthService", "Token"]);
+
+      // A method: validate's signature uses the type-only User import and the
+      // same-file Token alias; its own class is excluded.
+      const validate = await api.getDependencies(
+        "src/auth.ts",
+        "AuthService/validate",
+      );
+      expect(validate.imports).toEqual([
+        { name: "User", from: "./users", typeOnly: true },
+      ]);
+      expect(validate.sameFile).toEqual(["Token"]);
+    },
+    { timeout: 30_000 },
+  );
 });

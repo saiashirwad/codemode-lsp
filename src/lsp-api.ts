@@ -20,6 +20,7 @@ import type {
 } from "vscode-languageserver-protocol";
 import { DiagnosticSeverity } from "vscode-languageserver-protocol";
 import { isLspDocumentPath, TransactionalBuffer } from "./buffer";
+import { analyzeDependencies, type SymbolDependencies } from "./dependencies";
 import type { LspClient } from "./lsp-client";
 import {
   buildSymbolInfoTree,
@@ -642,6 +643,40 @@ export class LspApi {
       if (info) results.push(info);
     }
     return results;
+  }
+
+  /** What the symbol's body uses from OUTSIDE itself: imported bindings (with module + type-only flag) and same-file top-level symbols — the exact imports it needs if moved to another file. Syntactic, so a local shadowing an import can rarely produce a false positive. */
+  async getDependencies(
+    file: string,
+    symbolPath: string,
+  ): Promise<SymbolDependencies> {
+    this.requireStrings(
+      "getDependencies(file, symbolPath)",
+      'await lsp.getDependencies("src/payments.ts", "recordPayment")',
+      { file, symbolPath },
+    );
+    const resolved = this.resolveWorkspacePath(file);
+    const symbols = await this.documentSymbols(resolved);
+    const symbol = resolveSymbolPath({
+      file: resolved.relPath,
+      symbolPath,
+      symbols,
+    });
+    const text = this.readTextSafe(resolved);
+    const topLevelNames = buildSymbolInfoTree(symbols, text).map(
+      (info) => info.name,
+    );
+    // Exclude the symbol's own top-level ancestor so recursion (or a method
+    // referencing its own class) doesn't count as a same-file dependency.
+    const selfName =
+      symbol.path.split("/")[0]?.replace(/\[\d+\]$/, "") ?? symbol.name;
+    return analyzeDependencies({
+      fileName: resolved.relPath,
+      sourceText: text,
+      range: symbol.range,
+      topLevelNames,
+      selfName,
+    });
   }
 
   /** Resolve (file, symbolPath) to the LSP call-hierarchy item, or throw an LLM-targeted error. */

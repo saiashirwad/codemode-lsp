@@ -31,6 +31,8 @@ const COMMON_INTERFACE_NAMES = [
   "Reference",
   "CallInfo",
   "CallSite",
+  "SymbolDependencies",
+  "ImportDependency",
   "Location",
   "SearchResult",
   "Diagnostic",
@@ -186,9 +188,14 @@ export function generateTypesModuleSource(): string {
   const outputs = emitDeclarations();
   const lspApiDts = parseDts(requireOutput(outputs, "lsp-api.d.ts"));
   const symbolDts = parseDts(requireOutput(outputs, "symbol.d.ts"));
+  const dependenciesDts = parseDts(requireOutput(outputs, "dependencies.d.ts"));
 
   const interfaces = new Map([
     ...extractInterfaces(symbolDts, ["SymbolInfo"]),
+    ...extractInterfaces(dependenciesDts, [
+      "SymbolDependencies",
+      "ImportDependency",
+    ]),
     ...extractInterfaces(lspApiDts, [
       ...COMMON_INTERFACE_NAMES,
       ...WRITE_INTERFACE_NAMES,
