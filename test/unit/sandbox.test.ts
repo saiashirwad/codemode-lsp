@@ -206,6 +206,43 @@ describe("non-serializable results", () => {
   });
 });
 
+describe("uncaptured-last-statement hint", () => {
+  test("a script ending in an if block explains its undefined result", async () => {
+    // Field report: `if (Array.isArray(refs)) { refs.map(...) } else {...}` as
+    // the last statement returned a bare `undefined` with no explanation.
+    const { result } = await runSandbox(
+      "const xs = [1, 2];\nif (xs.length > 0) { xs.map((x) => x * 2); } else { xs; }",
+      { lsp: stubApi() },
+    );
+    expect(result).toContain("undefined — note");
+    expect(result).toContain("an if statement");
+    expect(result).toContain("top-level");
+  });
+
+  test("a trailing for loop gets the same hint", async () => {
+    const { result } = await runSandbox(
+      "const out = [];\nfor (const x of [1]) { out.push(x); }",
+      { lsp: stubApi() },
+    );
+    expect(result).toContain("a for...of loop");
+  });
+
+  test("a return inside a trailing if block still wins — no hint", async () => {
+    const { result } = await runSandbox(
+      'if (1 < 2) { return "yes"; } else { return "no"; }',
+      { lsp: stubApi() },
+    );
+    expect(result).toBe('"yes"');
+  });
+
+  test("a genuinely-undefined trailing expression stays a plain undefined", async () => {
+    const { result } = await runSandbox("console.log('hi'); undefined", {
+      lsp: stubApi(),
+    });
+    expect(result).toBe("undefined");
+  });
+});
+
 describe("timeout", () => {
   test("an async-hanging script fails with a timeout error", async () => {
     await expect(

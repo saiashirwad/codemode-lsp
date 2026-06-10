@@ -60,6 +60,21 @@ describe("tool description", () => {
     expect(description).toContain("declare const lsp: {");
   });
 
+  test("truncation-resilient ordering: rules and op signatures precede interfaces and examples", () => {
+    // MCP clients may cut long descriptions; a field report showed an agent
+    // losing everything after the interfaces. The load-bearing parts (rules,
+    // lsp.* signatures) must come first, examples last.
+    const description = buildToolDescription(false);
+    const rules = description.indexOf("## Rules");
+    const signatures = description.indexOf("declare const lsp: {");
+    const interfaces = description.indexOf("interface SymbolInfo");
+    const examples = description.indexOf("## Examples");
+    expect(rules).toBeGreaterThan(-1);
+    expect(rules).toBeLessThan(signatures);
+    expect(signatures).toBeLessThan(interfaces);
+    expect(interfaces).toBeLessThan(examples);
+  });
+
   test("full mode includes every worked example; readonly only read examples", () => {
     const full = buildToolDescription(false);
     for (const example of WORKED_EXAMPLES) {

@@ -67,9 +67,12 @@ const errors = result.diagnostics.filter((d) => d.severity === "error");
 ];
 
 /**
- * Render the {{types}} block: interfaces + a typed `lsp` object. Under
- * CODEMODE_READONLY the write signatures and WriteResult are absent — the LLM
- * never sees them, so it never tries them.
+ * Render the {{types}} block: a typed `lsp` object, then the supporting
+ * interfaces. The signatures come FIRST deliberately: MCP clients may truncate
+ * long tool descriptions, and a field report showed an agent that received the
+ * interfaces but lost the op signatures — the single most load-bearing part.
+ * Under CODEMODE_READONLY the write signatures and WriteResult are absent —
+ * the LLM never sees them, so it never tries them.
  */
 export function renderLspTypes(readonly: boolean): string {
   const interfaces = readonly
@@ -78,7 +81,7 @@ export function renderLspTypes(readonly: boolean): string {
   const ops = readonly
     ? LSP_READ_OP_SIGNATURES
     : `${LSP_READ_OP_SIGNATURES}\n\n  // Write operations — buffered, applied atomically when the script succeeds.\n${LSP_WRITE_OP_SIGNATURES}`;
-  return `${interfaces}\n\ndeclare const lsp: {\n${ops}\n};`;
+  return `declare const lsp: {\n${ops}\n};\n\n${interfaces}`;
 }
 
 const TEMPLATE = `Execute JavaScript to perform semantic code operations via LSP (TypeScript).
@@ -90,6 +93,32 @@ instead of across many tool calls. The sandbox provides \`lsp\`,
 setTimeout). The tool returns { result, logs, changes }, where \`result\` is the
 script's last expression, JSON-serialized.
 
+## Rules
+
+- The last TOP-LEVEL expression is the return value — end the script with a
+  bare expression, e.g. \`({ count })\`. An expression inside a trailing
+  if/for/try block is NOT captured; use a top-level \`return\` from inside
+  blocks.
+- Every \`lsp.*\` call returns a Promise — always \`await\` it. An un-awaited
+  call inside the result serializes as \`{}\`.
+- \`.filter()\`/\`.map()\` callbacks cannot be async — use \`for...of\` with \`await\`.
+- \`searchText\`/\`listFiles\` cover the whole workspace (minus .gitignore);
+  scope with a glob, which matches the full workspace-relative path:
+  \`listFiles("src/**")\` for a directory (a bare name like \`"src"\` is treated
+  as \`src/**\`), \`listFiles()\` for every file. \`searchText\`'s second argument
+  is a glob string — there is no options object; filter results in your script.
+- Symbol paths are slash-separated (\`MyClass/myMethod\`); discover exact paths
+  with \`getSymbols(file)\` rather than guessing. Symbol ops always take the
+  pair \`(file, symbolPath)\` — a \`SymbolInfo.path\` belongs to the file you
+  called \`getSymbols\` on, and round-trips into findReferences/goToDefinition/
+  the write ops.
+- \`searchText\` patterns are regexes — escape metacharacters for literal text:
+  \`searchText("new NotFoundError\\\\(")\`.
+- File paths are relative to the workspace root; anything outside it is
+  rejected.
+- Diagnostics cover files touched this session only, never the whole project.
+  \`Diagnostic.range\` is zero-based; every other line/column is 1-based.
+
 ## API
 
 {{types}}
@@ -98,28 +127,7 @@ script's last expression, JSON-serialized.
 
 ## Examples
 
-{{examples}}
-
-## Rules
-
-- The last expression is the return value — end the script with the value you
-  want back, e.g. \`({ count })\`.
-- Every \`lsp.*\` call returns a Promise — always \`await\` it. An un-awaited
-  call inside the result serializes as \`{}\`.
-- \`.filter()\`/\`.map()\` callbacks cannot be async — use \`for...of\` with \`await\`.
-- Globs match the whole workspace-relative path: \`listFiles("src/**")\` for a
-  directory (a bare directory name like \`"src"\` is treated as \`src/**\`),
-  \`listFiles()\` for every file. \`searchText\`'s second argument is a glob
-  string — there is no options object; filter results in your script.
-- Symbol paths are slash-separated (\`MyClass/myMethod\`); discover exact paths
-  with \`getSymbols(file)\` rather than guessing. Symbol ops always take the
-  pair \`(file, symbolPath)\` — a \`SymbolInfo.path\` belongs to the file you
-  called \`getSymbols\` on.
-- \`searchText\` patterns are regexes — escape metacharacters for literal text:
-  \`searchText("new NotFoundError\\\\(")\`.
-- File paths are relative to the workspace root; anything outside it is
-  rejected.
-- Diagnostics cover files touched this session only, never the whole project.`;
+{{examples}}`;
 
 const WRITE_SEMANTICS = `Write operations available: writes are buffered during the script and applied
 atomically (flushed to disk) only when the whole script succeeds; if it throws,

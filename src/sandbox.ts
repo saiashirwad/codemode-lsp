@@ -196,6 +196,41 @@ const hostPath = { join, basename, dirname, extname } as const;
 interface NormalizedCode {
   /** Source ready to run as `(async () => { ... })()`. */
   source: string;
+  /**
+   * Human description of the script's last top-level statement when it is one
+   * that produces no capturable value (an if/for/try block, a declaration, …).
+   * Used to explain an `undefined` result instead of returning it silently —
+   * field report: a script ending in `if (…) { refs.map(…) } else { … }`
+   * returned bare `undefined` and cost an avoidable round-trip.
+   */
+  uncapturedLastStatement?: string;
+}
+
+const UNCAPTURED_STATEMENT_NAMES: Record<string, string> = {
+  IfStatement: "an if statement",
+  ForStatement: "a for loop",
+  ForOfStatement: "a for...of loop",
+  ForInStatement: "a for...in loop",
+  WhileStatement: "a while loop",
+  DoWhileStatement: "a do...while loop",
+  TryStatement: "a try/catch block",
+  SwitchStatement: "a switch statement",
+  BlockStatement: "a block",
+  VariableDeclaration: "a variable declaration",
+  FunctionDeclaration: "a function declaration",
+  ClassDeclaration: "a class declaration",
+};
+
+/**
+ * Describe a last statement whose value cannot be captured. Returns undefined
+ * for statement kinds that DO produce/route a value (expression statements are
+ * handled separately; a top-level `return` already works inside the IIFE — and
+ * so do returns nested in a final if/try block, which is why the runner only
+ * surfaces this description when the result actually came back undefined).
+ */
+function describeUncapturedStatement(type: string): string | undefined {
+  if (type === "ReturnStatement") return undefined;
+  return UNCAPTURED_STATEMENT_NAMES[type] ?? `a ${type}`;
 }
 
 function isExpressionStatement(node: { type: string }): boolean {
@@ -267,8 +302,17 @@ export function normalizeCode(code: string): NormalizedCode {
     return { source: `${head}\nreturn (${expr});` };
   }
 
-  // No trailing expression: run for effect, return undefined.
-  return { source: `${trimmed}\nreturn undefined;` };
+  // No trailing expression: run for effect, return undefined. Remember what
+  // the last statement was so an undefined result can explain itself.
+  return {
+    source: `${trimmed}\nreturn undefined;`,
+    ...(last
+      ? (() => {
+          const described = describeUncapturedStatement(last.type);
+          return described ? { uncapturedLastStatement: described } : {};
+        })()
+      : {}),
+  };
 }
 
 /** Truncate `text` to `cap` chars, appending `marker` when it overflows. */
@@ -482,7 +526,7 @@ export async function runSandbox(
     opNames,
   );
 
-  const { source } = normalizeCode(code);
+  const { source, uncapturedLastStatement } = normalizeCode(code);
   // Wrap in an async IIFE; the returned Promise is awaited here (auto-await).
   const wrapped = `(async () => {\n${source}\n})()`;
 
@@ -534,7 +578,16 @@ export async function runSandbox(
 
   let result: string;
   try {
-    result = serializeResult(value);
+    // A silent `undefined` from a script ending in a block is undiagnosable —
+    // explain it in-band rather than throwing (throwing would roll back
+    // legitimate writes the script already made).
+    result =
+      value === undefined && uncapturedLastStatement
+        ? `undefined — note: the script's last statement is ${uncapturedLastStatement}, ` +
+          "which produces no capturable value. Only a top-level trailing " +
+          "expression becomes the result — end the script with a bare " +
+          "expression (e.g. `({ count })`), or use a top-level `return`."
+        : serializeResult(value);
   } catch (error) {
     throw new SandboxError({
       error: error instanceof Error ? error.message : String(error),
