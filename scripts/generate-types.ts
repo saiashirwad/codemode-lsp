@@ -33,6 +33,7 @@ const COMMON_INTERFACE_NAMES = [
   "CallSite",
   "SymbolDependencies",
   "ImportDependency",
+  "ClosureSymbol",
   "Location",
   "SearchResult",
   "Diagnostic",

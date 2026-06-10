@@ -108,6 +108,13 @@ export function createExecuteRunner(deps: ExecuteToolDeps): {
           helpText:
             deps.helpText ?? buildToolDescription(deps.readonly ?? false),
         });
+        // Advisory hints ride in `logs` so the model sees them even when the
+        // script's return value drops the op results they were attached to.
+        const hints = deps.api
+          .takeHints()
+          .map((hint) => `[hint] ${hint}`)
+          .join("\n");
+        const logsWithHints = [logs, hints].filter(Boolean).join("\n");
         // Success → flush buffered writes to disk, producing reviewable diffs.
         const flushed = buffer.flush();
         const changes: Change[] = flushed.map((change) => ({
@@ -122,7 +129,7 @@ export function createExecuteRunner(deps: ExecuteToolDeps): {
         // Diffs count toward the result size cap (PRD § The execute Tool).
         return {
           result,
-          logs,
+          logs: logsWithHints,
           changes: capChanges(
             changes,
             Math.max(0, RESULT_CHAR_CAP - result.length),

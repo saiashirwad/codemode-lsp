@@ -46,6 +46,7 @@ import {
   buildSymbolInfoTree,
   containingFunctionPath,
   isDocumentSymbolArray,
+  type ResolvedSymbol,
   resolveSymbolPath,
   type SymbolInfo,
   symbolKindName,
@@ -131,11 +132,25 @@ export interface WriteResult {
   filesChanged: string[];
   /** Fresh diagnostics for the affected files; gate on severity "error" but skip likelyFalsePositive ones. */
   diagnostics: Diagnostic[];
+  /** Advisory from the server: a cheaper way to do what this call just did. Nothing is wrong — but heed it. */
+  hint?: string;
 }
 
 export interface MoveSymbolResult extends WriteResult {
   /** Same-file dependencies left behind in `file` that were auto-exported so the moved body can import them. */
   autoExported: string[];
+}
+
+/** One member of a same-file dependency closure (see getDependencyClosure). */
+export interface ClosureSymbol {
+  /** Top-level symbol path — a ready-to-use handle for other lsp.* calls. */
+  path: string;
+  kind: string;
+  exported: boolean;
+  /** 1-based. */
+  startLine: number;
+  /** True for a requested seed, false for a symbol pulled in as a dependency. */
+  isSeed: boolean;
 }
 
 export type { ProjectCheckResult } from "./project-check";
@@ -367,12 +382,37 @@ export class LspApi {
   beginTransaction(): TransactionalBuffer {
     const buffer = new TransactionalBuffer(this.client);
     this.buffer = buffer;
+    this.pendingHints = [];
+    this.moveCallsByTarget.clear();
+    this.movedThisTransaction = false;
     return buffer;
   }
 
   /** End the current transaction, clearing the active buffer. */
   endTransaction(): void {
     this.buffer = null;
+  }
+
+  // Advisory hints: ops push one when the script just did something a cheaper
+  // call covers (e.g. per-symbol moves instead of moveSymbols). They ride on
+  // the op's return value AND in the tool's `logs` — the description's prose
+  // rules demonstrably don't survive from read-time to write-time, but a
+  // message landing at the moment of waste does (the call-hierarchy error in a
+  // field run produced an instant self-correction).
+  private pendingHints: string[] = [];
+  private moveCallsByTarget = new Map<string, number>();
+  private movedThisTransaction = false;
+
+  /** Drain the advisory hints collected during the current script (deduped, in order). */
+  takeHints(): string[] {
+    const hints = [...new Set(this.pendingHints)];
+    this.pendingHints = [];
+    return hints;
+  }
+
+  private addHint(hint: string): string {
+    this.pendingHints.push(hint);
+    return hint;
   }
 
   /**
@@ -724,6 +764,86 @@ export class LspApi {
       topLevelNames,
       selfName,
     });
+  }
+
+  /** Transitive same-file dependency closure of one or more TOP-LEVEL seed symbols, in source order — the exact member list for extracting a cluster to another module. You judge which seeds define the cluster; this owns the graph walk (no hand-rolled fixpoint loops over getDependencies). */
+  async getDependencyClosure(
+    file: string,
+    seedPaths: string[],
+  ): Promise<ClosureSymbol[]> {
+    this.requireStrings(
+      "getDependencyClosure(file, seedPaths)",
+      'await lsp.getDependencyClosure("src/commands.ts", ["selectAccount"])',
+      { file },
+    );
+    if (
+      !Array.isArray(seedPaths) ||
+      seedPaths.length === 0 ||
+      seedPaths.some((p) => typeof p !== "string" || p.length === 0)
+    ) {
+      throw new Error(
+        `getDependencyClosure(file, seedPaths): "seedPaths" must be a non-empty array of top-level symbol-path strings but got ${JSON.stringify(seedPaths)}. Example: await lsp.getDependencyClosure("src/commands.ts", ["selectAccount", "AccountChoice"])`,
+      );
+    }
+    const resolved = this.resolveWorkspacePath(file);
+    const symbols = await this.documentSymbols(resolved);
+    const text = this.readTextSafe(resolved);
+    const infoTree = buildSymbolInfoTree(symbols, text);
+    const topLevelNames = infoTree.map((info) => info.name);
+
+    const seedNames = new Set<string>();
+    for (const seedPath of seedPaths) {
+      const symbol = resolveSymbolPath({
+        file: resolved.relPath,
+        symbolPath: seedPath,
+        symbols,
+      });
+      if (symbol.path.includes("/")) {
+        throw new Error(
+          `getDependencyClosure walks TOP-LEVEL symbols only, but "${symbol.path}" is nested inside "${symbol.path.split("/")[0]}". Seed with the top-level symbol instead.`,
+        );
+      }
+      seedNames.add(symbol.path.replace(/\[\d+\]$/, ""));
+    }
+
+    const inClosure = new Set<string>(seedNames);
+    const queue = [...seedNames];
+    while (queue.length > 0) {
+      const name = queue.shift() as string;
+      const info = infoTree.find((entry) => entry.name === name);
+      if (!info) continue;
+      const symbol = resolveSymbolPath({
+        file: resolved.relPath,
+        symbolPath: info.path,
+        symbols,
+      });
+      const deps = analyzeDependencies({
+        fileName: resolved.relPath,
+        sourceText: text,
+        range: symbol.range,
+        topLevelNames,
+        selfName: name,
+      });
+      for (const dependency of deps.sameFile) {
+        if (!inClosure.has(dependency)) {
+          inClosure.add(dependency);
+          queue.push(dependency);
+        }
+      }
+    }
+
+    // Source order (the server returns symbols in its own order): closure
+    // members read best and move cleanest in declaration order.
+    return infoTree
+      .filter((info) => inClosure.has(info.name))
+      .sort((a, b) => a.startLine - b.startLine)
+      .map((info) => ({
+        path: info.path,
+        kind: info.kind,
+        exported: info.exported,
+        startLine: info.startLine,
+        isSeed: seedNames.has(info.name),
+      }));
   }
 
   /** Resolve (file, symbolPath) to the LSP call-hierarchy item, or throw an LLM-targeted error. */
@@ -1186,7 +1306,7 @@ export class LspApi {
     return this.runSourceAction(file, [["source.addMissingImports.ts"]]);
   }
 
-  /** Move a TOP-LEVEL symbol to another file (created if missing): brings its JSDoc, computes the target's imports (deduped against what it already imports), back-imports if the source still uses it, repoints every importer (alias-aware), and prunes the source's now-unused imports. The moved symbol becomes exported. Moving a whole cluster? moveSymbols is much faster. */
+  /** Move a TOP-LEVEL symbol to another file (created if missing): brings its JSDoc, computes the target's imports (deduped against what it already imports), back-imports if the source still uses it, repoints EVERY importer project-wide (alias-aware), and prunes the source's now-unused imports — so re-export shims and post-move organizeImports/addMissingImports are unnecessary. Moving a whole cluster? moveSymbols is much faster. */
   async moveSymbol(
     file: string,
     symbolPath: string,
@@ -1200,7 +1320,7 @@ export class LspApi {
     return this.moveSymbolsImpl(file, [symbolPath], targetFile);
   }
 
-  /** Move several TOP-LEVEL symbols from one file to another in one pass (list them in dependency order: types/helpers first). Same per-symbol behavior as moveSymbol, but imports/cleanups/diagnostics are handled once for the whole batch — the fast path for extracting a cluster. */
+  /** Move several TOP-LEVEL symbols from one file to another in one pass, in ANY order (dependency ordering is computed internally). Same per-symbol behavior as moveSymbol, but imports/cleanups/diagnostics are handled once for the whole batch — the fast path for extracting a cluster (pair with getDependencyClosure). */
   async moveSymbols(
     file: string,
     symbolPaths: string[],
@@ -1248,9 +1368,17 @@ export class LspApi {
       (buffer.peekText(target.absPath) !== undefined ||
         existsSync(target.absPath));
 
+    // Dependency ordering is OUR job, not the caller's: moving helpers/types
+    // before their dependents avoids transient back-imports that the cleanup
+    // pass then has to undo. Callers may pass paths in any order.
+    const ordered =
+      symbolPaths.length > 1
+        ? await this.orderForMove(source, symbolPaths)
+        : symbolPaths;
+
     const touched = new Set<string>([source.absPath, target.absPath]);
     const autoExported = new Set<string>();
-    for (const symbolPath of symbolPaths) {
+    for (const symbolPath of ordered) {
       const moved = await this.moveOneSymbol(
         buffer,
         source,
@@ -1273,6 +1401,17 @@ export class LspApi {
 
     const touchedList = [...touched];
     const diagnostics = await this.collectDiagnostics(touchedList);
+
+    this.movedThisTransaction = true;
+    const callCount = (this.moveCallsByTarget.get(target.relPath) ?? 0) + 1;
+    this.moveCallsByTarget.set(target.relPath, callCount);
+    const hint =
+      symbolPaths.length === 1 && callCount >= 3
+        ? this.addHint(
+            `${callCount} separate moveSymbol calls to "${target.relPath}" in this script — moveSymbols(file, [...symbolPaths], targetFile) moves a whole cluster in ONE call (any order) and is several times faster. getDependencyClosure(file, seeds) computes the cluster's member list for you.`,
+          )
+        : undefined;
+
     return {
       file: source.relPath,
       filesChanged: touchedList
@@ -1280,7 +1419,78 @@ export class LspApi {
         .sort(),
       diagnostics,
       autoExported: [...autoExported].sort(),
+      ...(hint ? { hint } : {}),
     };
+  }
+
+  /**
+   * Order symbol paths so same-file dependencies move before their dependents
+   * (post-order DFS over the to-move set; source order as tie-break, cycles
+   * fall back to encounter order). Nested/invalid paths skip sorting — the
+   * per-symbol move surfaces its own LLM-targeted error.
+   */
+  private async orderForMove(
+    source: ResolvedWorkspacePath,
+    symbolPaths: string[],
+  ): Promise<string[]> {
+    const text = this.readText(source);
+    const symbols = await this.documentSymbols(source);
+    const infoTree = buildSymbolInfoTree(symbols, text);
+    const topLevelNames = infoTree.map((info) => info.name);
+
+    interface MoveEntry {
+      requestedPath: string;
+      name: string;
+      startLine: number;
+      deps: string[];
+    }
+    const entries: MoveEntry[] = [];
+    for (const requestedPath of symbolPaths) {
+      let symbol: ResolvedSymbol;
+      try {
+        symbol = resolveSymbolPath({
+          file: source.relPath,
+          symbolPath: requestedPath,
+          symbols,
+        });
+      } catch {
+        return symbolPaths;
+      }
+      if (symbol.path.includes("/")) return symbolPaths;
+      const name = symbol.path.replace(/\[\d+\]$/, "");
+      const deps = analyzeDependencies({
+        fileName: source.relPath,
+        sourceText: text,
+        range: symbol.range,
+        topLevelNames,
+        selfName: name,
+      });
+      entries.push({
+        requestedPath,
+        name,
+        startLine: symbol.range.start.line,
+        deps: deps.sameFile,
+      });
+    }
+
+    const byName = new Map(entries.map((entry) => [entry.name, entry]));
+    entries.sort((a, b) => a.startLine - b.startLine);
+    const ordered: string[] = [];
+    const done = new Set<string>();
+    const visiting = new Set<string>();
+    const visit = (entry: MoveEntry): void => {
+      if (done.has(entry.name) || visiting.has(entry.name)) return;
+      visiting.add(entry.name);
+      for (const dep of entry.deps) {
+        const depEntry = byName.get(dep);
+        if (depEntry) visit(depEntry);
+      }
+      visiting.delete(entry.name);
+      done.add(entry.name);
+      ordered.push(entry.requestedPath);
+    };
+    for (const entry of entries) visit(entry);
+    return ordered;
   }
 
   /** Move one top-level symbol; analysis-then-mutation, no cleanups/diagnostics. */
@@ -1552,7 +1762,19 @@ export class LspApi {
     }
     affected = [...new Set(affected)];
     if (affected.length === 0) {
-      return { file: resolved.relPath, filesChanged: [], diagnostics: [] };
+      // The field pattern: belt-and-suspenders organize/addMissing calls after
+      // a move, each a no-op costing a server round trip (and retries).
+      const hint = this.movedThisTransaction
+        ? this.addHint(
+            "Nothing to change — moveSymbol/moveSymbols already prune the source's imports and compute a deduped target header; organizeImports/addMissingImports after a move are normally unnecessary.",
+          )
+        : undefined;
+      return {
+        file: resolved.relPath,
+        filesChanged: [],
+        diagnostics: [],
+        ...(hint ? { hint } : {}),
+      };
     }
     const diagnostics = await this.collectDiagnostics(affected);
     return {

@@ -18,14 +18,27 @@ export interface EvalContext {
   answer: string;
   /** Workspace root for this task (a temp copy of the fixture project). */
   dir: string;
+  /**
+   * Every script the agent passed to the execute tool, in order. Lets graders
+   * judge SHAPE, not just outcome — the field lesson is that a wasteful path
+   * (hand-spliced moves, per-symbol loops, redundant cleanup calls) can still
+   * land the right disk state, so outcome-only grading can't see steering
+   * regressions.
+   */
+  scripts: string[];
   read(file: string): string | null;
   exists(file: string): boolean;
 }
 
-export function createEvalContext(dir: string, answer: string): EvalContext {
+export function createEvalContext(
+  dir: string,
+  answer: string,
+  scripts: string[] = [],
+): EvalContext {
   return {
     answer,
     dir,
+    scripts,
     read(file: string): string | null {
       const abs = join(dir, file);
       return existsSync(abs) ? readFileSync(abs, "utf8") : null;
@@ -375,6 +388,53 @@ await lsp.deleteSymbol("src/users.ts", "registry");
 const result = await lsp.insertBeforeSymbol("src/users.ts", "User",
   'import { registry } from "./registry";\\n\\n');
 result.diagnostics.filter((d) => d.severity === "error");`,
+    ],
+  },
+  {
+    id: "extract-session-cluster",
+    kind: "write",
+    prompt:
+      "Extract the session core out of src/auth.ts into a new module" +
+      " src/session.ts: move the AuthService class and the Token type, and" +
+      " update every import so the project still type-checks." +
+      " createAuthMiddleware stays behind in src/auth.ts. Use as few execute" +
+      " calls as you can.",
+    // Graded on SHAPE as well as outcome: this is the standing field-test task
+    // in miniature, and the field lesson is that agents can land the right
+    // disk state via 150 lines of hand-rolled discovery, per-symbol move
+    // loops, and redundant cleanup calls. The cheap path is getDependencyClosure
+    // → one moveSymbols → one checkProject.
+    grade: (ctx) => {
+      const session = ctx.read("src/session.ts");
+      const auth = ctx.read("src/auth.ts") ?? "";
+      if (session === null) return fail("src/session.ts was not created");
+      if (!/export class AuthService/.test(session))
+        return fail("session.ts does not export AuthService");
+      if (!/export type Token/.test(session))
+        return fail("session.ts does not export Token");
+      if (/class AuthService|type Token\s*=/.test(auth))
+        return fail("auth.ts still declares the moved symbols");
+      if (!hasWord(auth, "createAuthMiddleware"))
+        return fail("createAuthMiddleware did not stay in auth.ts");
+      if (!/from ["']\.\/session["']/.test(auth))
+        return fail("auth.ts does not import from ./session");
+      if (!ctx.scripts.some((script) => /\bmoveSymbols?\s*\(/.test(script)))
+        return fail(
+          "no script used moveSymbol/moveSymbols — the move was hand-spliced",
+        );
+      if (ctx.scripts.length > 2)
+        return fail(
+          `took ${ctx.scripts.length} execute calls — the cheap path is 1 (closure + moveSymbols + checkProject)`,
+        );
+      return ok(
+        `extracted via moveSymbol(s) in ${ctx.scripts.length} execute call(s)`,
+      );
+    },
+    reference: [
+      `const cluster = await lsp.getDependencyClosure("src/auth.ts", ["AuthService"]);
+const moved = await lsp.moveSymbols("src/auth.ts", cluster.map((s) => s.path), "src/session.ts");
+const check = await lsp.checkProject();
+({ moved: cluster.map((s) => s.path), filesChanged: moved.filesChanged, projectErrors: check.errorCount });`,
     ],
   },
 ];

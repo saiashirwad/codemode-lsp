@@ -52,6 +52,37 @@ describe("LspApi read operations (integration)", () => {
   );
 
   test(
+    "getDependencyClosure walks same-file deps transitively, in source order",
+    async () => {
+      // createAuthMiddleware uses AuthService and Token; AuthService uses
+      // Token — the closure pulls both in, ordered by declaration.
+      const closure = await api.getDependencyClosure("src/auth.ts", [
+        "createAuthMiddleware",
+      ]);
+      expect(closure.map((s) => s.path)).toEqual([
+        "Token",
+        "AuthService",
+        "createAuthMiddleware",
+      ]);
+      expect(closure.map((s) => s.isSeed)).toEqual([false, false, true]);
+      expect(closure.every((s) => s.startLine >= 1)).toBe(true);
+
+      // Dependencies are walked, dependents are not: seeding AuthService must
+      // NOT pull in createAuthMiddleware (which depends ON it).
+      const core = await api.getDependencyClosure("src/auth.ts", [
+        "AuthService",
+      ]);
+      expect(core.map((s) => s.path)).toEqual(["Token", "AuthService"]);
+
+      // Nested seeds are rejected with the top-level rule spelled out.
+      await expect(
+        api.getDependencyClosure("src/auth.ts", ["AuthService/validate"]),
+      ).rejects.toThrow(/TOP-LEVEL symbols only.*AuthService/s);
+    },
+    { timeout: 30_000 },
+  );
+
+  test(
     "getSymbolBody supports slash paths and dot aliases",
     async () => {
       const body = await api.getSymbolBody(

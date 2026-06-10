@@ -48,15 +48,19 @@ const callees = await lsp.outgoingCalls("src/users.ts", "findUser");
 });`,
   },
   {
-    title: "Move a symbol and verify the project",
+    title: "Extract a cluster into a new module (move + verify)",
     writes: true,
-    code: `// Move a top-level symbol to another module — the target's imports are
-// computed, every importer is repointed, and the source's imports pruned.
-const moved = await lsp.moveSymbol("src/auth.ts", "createAuthMiddleware", "src/middleware.ts");
-// Verify the WHOLE project over the buffered state — unlike per-file
+    code: `// Judgment: pick the seed symbol(s) that define the cluster. Mechanics: the
+// closure walks same-file dependencies for you — no hand-rolled fixpoint loops.
+const cluster = await lsp.getDependencyClosure("src/auth.ts", ["AuthService"]);
+// ONE batch move (any order): imports computed and deduped, EVERY importer
+// repointed, source pruned. No organizeImports / addMissingImports / re-export
+// shims needed afterwards.
+const moved = await lsp.moveSymbols("src/auth.ts", cluster.map((s) => s.path), "src/session.ts");
+// ONE whole-project check over the buffered state — unlike per-file
 // getDiagnostics, path aliases resolve here even in files created this script.
 const check = await lsp.checkProject();
-({ filesChanged: moved.filesChanged, projectErrors: check.errorCount });`,
+({ moved: cluster.map((s) => s.path), filesChanged: moved.filesChanged, projectErrors: check.errorCount });`,
   },
   {
     title: "Batch refactor: migrate every caller",
@@ -151,17 +155,24 @@ script's last expression, JSON-serialized.
   CALLABLE symbols only (functions/methods/constructors) — for types,
   variables, and constants use \`findReferences\`/\`getDependencies\` instead.
 - Moving code? \`moveSymbol(file, symbolPath, targetFile)\` moves a TOP-LEVEL
-  symbol end to end: target imports computed, importers repointed, source
-  imports pruned — don't hand-splice what it can do in one call. Extracting a
-  CLUSTER? Use \`moveSymbols(file, [...paths], targetFile)\` (dependency order:
-  types/helpers first) — one batch is several times faster than per-symbol
-  calls. For custom splits, \`getDependencies(file, symbolPath)\` computes what
-  a symbol's body needs from outside itself, and
-  \`organizeImports\`/\`addMissingImports\` clean up import blocks natively.
+  symbol end to end: target imports computed and deduped, EVERY importer
+  project-wide repointed, source imports pruned. Don't hand-splice what it does
+  in one call, don't add re-export shims "for compatibility" (no import is left
+  pointing at the old file), and skip post-move \`organizeImports\`/
+  \`addMissingImports\` — there is nothing left for them to do.
+- Extracting a CLUSTER? \`getDependencyClosure(file, seeds)\` computes the full
+  member list (you judge the seeds, it walks same-file dependencies), then ONE
+  \`moveSymbols(file, [...paths], targetFile)\` call moves everything — any
+  order, several times faster than per-symbol moves. For custom splits,
+  \`getDependencies(file, symbolPath)\` computes what one symbol's body needs
+  from outside itself.
 - Keep MUTATING scripts lean: do discovery in one execute call, then a tight
   script that does the writes plus ONE final \`checkProject()\`. Per-move
   diagnostics, baseline checks, and redundant \`addMissingImports\` calls burn
   the script timeout — writes already roll back atomically on failure.
+- Results may carry a \`hint\` field (also echoed into \`logs\` as \`[hint]\`):
+  advisory only — the call succeeded, but a cheaper pattern exists. Follow it
+  in your next script.
 - \`goToDefinition\` only addresses symbols DEFINED in the given file — it cannot
   follow an imported or called name into another module. To resolve a name to
   its definition anywhere in the workspace, use \`findSymbol(name)\` and filter

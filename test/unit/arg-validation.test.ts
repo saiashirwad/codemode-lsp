@@ -93,6 +93,17 @@ describe("lsp.* argument validation", () => {
     );
   });
 
+  test("getDependencyClosure rejects a non-array or empty seedPaths with an example", async () => {
+    await expect(
+      api.getDependencyClosure("src/auth.ts", "Token" as unknown as string[]),
+    ).rejects.toThrow(
+      /getDependencyClosure\(file, seedPaths\).*non-empty array.*Example/s,
+    );
+    await expect(api.getDependencyClosure("src/auth.ts", [])).rejects.toThrow(
+      /non-empty array/,
+    );
+  });
+
   test("moveSymbol validates all three arguments", async () => {
     // @ts-expect-error deliberate wrong arity
     await expect(api.moveSymbol("src/auth.ts", "Token")).rejects.toThrow(

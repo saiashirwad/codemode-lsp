@@ -61,38 +61,41 @@ describe("golden scripts — the tool-description examples run as-is", () => {
     expect(WORKED_EXAMPLES.map((example) => example.title).sort()).toEqual([
       "Batch refactor: migrate every caller",
       "Explore a project",
-      "Move a symbol and verify the project",
+      "Extract a cluster into a new module (move + verify)",
       "Trace the call graph",
       "Write, then check diagnostics",
     ]);
   });
 
   test(
-    "Move a symbol and verify the project",
+    "Extract a cluster into a new module (move + verify)",
     async () => {
       const payload = await execute(
-        exampleCode("Move a symbol and verify the project"),
+        exampleCode("Extract a cluster into a new module (move + verify)"),
       );
       const result = JSON.parse(payload.result) as {
+        moved: string[];
         filesChanged: string[];
         projectErrors: number;
       };
-      expect(result.filesChanged).toEqual(["src/auth.ts", "src/middleware.ts"]);
+      // The closure pulled in Token (AuthService's same-file dependency) but
+      // NOT createAuthMiddleware (a dependent, which stays behind).
+      expect(result.moved).toEqual(["Token", "AuthService"]);
+      expect(result.filesChanged).toEqual(["src/auth.ts", "src/session.ts"]);
       // checkProject sees the whole project — including the intentional
       // type error in src/broken.ts. The move itself adds no errors.
       expect(result.projectErrors).toBe(1);
       expect(payload.changes.map((change) => change.file).sort()).toEqual([
         "src/auth.ts",
-        "src/middleware.ts",
+        "src/session.ts",
       ]);
-      const onDisk = readFileSync(
-        join(fixture.dir, "src/middleware.ts"),
-        "utf8",
-      );
-      expect(onDisk).toContain("export function createAuthMiddleware");
-      expect(onDisk).toContain(
-        'import { AuthService, type Token } from "./auth";',
-      );
+      const onDisk = readFileSync(join(fixture.dir, "src/session.ts"), "utf8");
+      expect(onDisk).toContain("export type Token");
+      expect(onDisk).toContain("export class AuthService");
+      // The stayed-behind dependent now imports the moved cluster.
+      const source = readFileSync(join(fixture.dir, "src/auth.ts"), "utf8");
+      expect(source).toContain("createAuthMiddleware");
+      expect(source).toContain('from "./session"');
     },
     { timeout: 30_000 },
   );

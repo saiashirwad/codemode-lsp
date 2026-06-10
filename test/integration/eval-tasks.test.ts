@@ -62,9 +62,9 @@ describe("eval tasks — reference solutions pass their graders", () => {
     return lastResult;
   }
 
-  test("task list shape: 16 tasks, unique ids, both kinds covered", () => {
-    expect(EVAL_TASKS).toHaveLength(16);
-    expect(new Set(EVAL_TASKS.map((task) => task.id)).size).toBe(16);
+  test("task list shape: 17 tasks, unique ids, both kinds covered", () => {
+    expect(EVAL_TASKS).toHaveLength(17);
+    expect(new Set(EVAL_TASKS.map((task) => task.id)).size).toBe(17);
     expect(EVAL_TASKS.some((task) => task.kind === "read")).toBe(true);
     expect(EVAL_TASKS.some((task) => task.kind === "write")).toBe(true);
   });
@@ -76,8 +76,11 @@ describe("eval tasks — reference solutions pass their graders", () => {
         const answer = await runReference(task);
         // The reference's last execute result stands in for the agent's final
         // answer: read graders accept it because the facts they check for
-        // appear in the returned data; write graders check disk state.
-        const verdict = task.grade(createEvalContext(fixture.dir, answer));
+        // appear in the returned data; write graders check disk state. The
+        // reference scripts double as ctx.scripts so shape graders run too.
+        const verdict = task.grade(
+          createEvalContext(fixture.dir, answer, task.reference),
+        );
         if (!verdict.pass) {
           console.error(
             `grader rejected reference for ${task.id}: ${verdict.detail}\nanswer was: ${answer}`,

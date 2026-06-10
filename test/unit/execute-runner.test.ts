@@ -19,6 +19,7 @@ function stubApi(): LspApi {
     listFiles: async () => [],
     beginTransaction: () => noopBuffer,
     endTransaction: () => {},
+    takeHints: () => [],
   } as unknown as LspApi;
 }
 

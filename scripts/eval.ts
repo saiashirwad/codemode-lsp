@@ -11,7 +11,7 @@
  * are disabled and only the MCP execute tool is allowed, so the agent cannot
  * route around the API under test. Run on demand, not in CI:
  *
- *   bun run eval                 # all 15 tasks (on sonnet)
+ *   bun run eval                 # all 17 tasks (on sonnet)
  *   bun run eval --task rename-finduser
  *   bun run eval --model opus
  */
@@ -61,6 +61,8 @@ interface AgentRun {
   answer: string;
   turns: number;
   durationMs: number;
+  /** Every script the agent passed to the execute tool, in order. */
+  scripts: string[];
   error?: string;
 }
 
@@ -84,8 +86,12 @@ function runAgent(task: EvalTask, dir: string, model: string): AgentRun {
     "mcp__codemode__execute",
     "--disallowedTools",
     DISALLOWED_TOOLS,
+    // stream-json (NDJSON, needs --verbose) instead of json: the per-message
+    // events carry the execute tool_use blocks, so graders can judge script
+    // SHAPE (op profile, call count), not just the final disk state.
     "--output-format",
-    "json",
+    "stream-json",
+    "--verbose",
     "--max-turns",
     "16",
     "--model",
@@ -102,36 +108,63 @@ function runAgent(task: EvalTask, dir: string, model: string): AgentRun {
   const durationMs = Date.now() - started;
 
   if (proc.error) {
-    return { answer: "", turns: 0, durationMs, error: String(proc.error) };
-  }
-  try {
-    interface ResultEvent {
-      type?: string;
-      result?: string;
-      num_turns?: number;
-      is_error?: boolean;
-      subtype?: string;
-    }
-    // --output-format json emits an array of events; the final answer lives in
-    // the event with type "result".
-    const parsed = JSON.parse(proc.stdout) as ResultEvent | ResultEvent[];
-    const events = Array.isArray(parsed) ? parsed : [parsed];
-    const result = events.find((event) => event.type === "result");
-    if (!result) throw new Error("no result event");
-    return {
-      answer: result.result ?? "",
-      turns: result.num_turns ?? 0,
-      durationMs,
-      error: result.is_error ? (result.subtype ?? "agent error") : undefined,
-    };
-  } catch {
     return {
       answer: "",
       turns: 0,
       durationMs,
-      error: `unparseable claude output (exit ${proc.status}): ${proc.stderr.slice(0, 500)}`,
+      scripts: [],
+      error: String(proc.error),
     };
   }
+  interface StreamEvent {
+    type?: string;
+    result?: string;
+    num_turns?: number;
+    is_error?: boolean;
+    subtype?: string;
+    message?: {
+      content?: Array<{
+        type?: string;
+        name?: string;
+        input?: { code?: string };
+      }>;
+    };
+  }
+  const events = proc.stdout
+    .split("\n")
+    .filter((line) => line.trim() !== "")
+    .flatMap((line): StreamEvent[] => {
+      try {
+        return [JSON.parse(line) as StreamEvent];
+      } catch {
+        return [];
+      }
+    });
+  const scripts = events
+    .filter((event) => event.type === "assistant")
+    .flatMap((event) => event.message?.content ?? [])
+    .filter(
+      (block) =>
+        block.type === "tool_use" && block.name === "mcp__codemode__execute",
+    )
+    .flatMap((block) => (block.input?.code ? [block.input.code] : []));
+  const result = events.find((event) => event.type === "result");
+  if (!result) {
+    return {
+      answer: "",
+      turns: 0,
+      durationMs,
+      scripts,
+      error: `no result event in claude output (exit ${proc.status}): ${proc.stderr.slice(0, 500)}`,
+    };
+  }
+  return {
+    answer: result.result ?? "",
+    turns: result.num_turns ?? 0,
+    durationMs,
+    scripts,
+    error: result.is_error ? (result.subtype ?? "agent error") : undefined,
+  };
 }
 
 interface TaskOutcome {
@@ -184,11 +217,12 @@ function main(): void {
       const run = runAgent(task, fixture.dir, model);
       const verdict = run.error
         ? { pass: false, detail: run.error }
-        : task.grade(createEvalContext(fixture.dir, run.answer));
+        : task.grade(createEvalContext(fixture.dir, run.answer, run.scripts));
       outcomes.push({ task, verdict, run });
       const seconds = (run.durationMs / 1000).toFixed(0);
       console.log(
-        `${verdict.pass ? "PASS" : "FAIL"} (${run.turns} turns, ${seconds}s)` +
+        `${verdict.pass ? "PASS" : "FAIL"} (${run.turns} turns, ` +
+          `${run.scripts.length} scripts, ${seconds}s)` +
           (verdict.pass ? "" : ` — ${verdict.detail}`),
       );
       if (!verdict.pass && run.answer) {

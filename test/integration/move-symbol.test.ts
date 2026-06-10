@@ -166,6 +166,72 @@ describe("moveSymbol (integration)", () => {
   );
 
   test(
+    "moveSymbols orders dependencies internally: dependent-first input still lands clean",
+    async () => {
+      const buffer = api.beginTransaction();
+      // Deliberately worst-case order: the dependent first, its dependencies
+      // after. The op must topo-sort (Token → AuthService →
+      // createAuthMiddleware) rather than demand the caller know that.
+      const result = await api.moveSymbols(
+        "src/auth.ts",
+        ["createAuthMiddleware", "AuthService", "Token"],
+        "src/core.ts",
+      );
+      const target = buffer.peekText(join(fixture.dir, "src/core.ts")) ?? "";
+      expect(target).toContain("export type Token");
+      expect(target).toContain("export class AuthService");
+      expect(target).toContain("export function createAuthMiddleware");
+      // Everything moved together — no transient back-imports survive.
+      expect(target).not.toContain('from "./auth"');
+      const consumer =
+        buffer.peekText(join(fixture.dir, "src/consumer.ts")) ?? "";
+      expect(consumer).toContain('from "./core"');
+      expect(result.filesChanged).toContain("src/core.ts");
+      const check = await api.checkProject();
+      expect(
+        check.diagnostics.filter((d) => d.file !== "src/broken.ts"),
+      ).toEqual([]);
+      api.endTransaction();
+    },
+    { timeout: 60_000 },
+  );
+
+  test(
+    "hints: repeated single moves and post-move no-op cleanups are flagged",
+    async () => {
+      api.beginTransaction();
+      const first = await api.moveSymbol("src/auth.ts", "Token", "src/x.ts");
+      expect(first.hint).toBeUndefined();
+      const second = await api.moveSymbol(
+        "src/auth.ts",
+        "AuthService",
+        "src/x.ts",
+      );
+      expect(second.hint).toBeUndefined();
+      // Third single-symbol move to the same target: the field pattern that
+      // moveSymbols exists to replace.
+      const third = await api.moveSymbol(
+        "src/auth.ts",
+        "createAuthMiddleware",
+        "src/x.ts",
+      );
+      expect(third.hint).toMatch(/moveSymbols\(/);
+      // Belt-and-suspenders cleanup on the already-pruned source is a no-op —
+      // and says so. (On the target it can still merge import lines left by
+      // SEQUENTIAL single moves — one more reason the hint pushes to a batch.)
+      const organize = await api.organizeImports("src/auth.ts");
+      expect(organize.filesChanged).toEqual([]);
+      expect(organize.hint).toMatch(/normally unnecessary/);
+      // takeHints drains the deduped advisory list (surfaced in tool logs).
+      const hints = api.takeHints();
+      expect(hints).toHaveLength(2);
+      expect(api.takeHints()).toEqual([]);
+      api.endTransaction();
+    },
+    { timeout: 60_000 },
+  );
+
+  test(
     "moving a symbol into a file that already imports it drops the stale import",
     async () => {
       const buffer = api.beginTransaction();

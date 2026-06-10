@@ -44,14 +44,16 @@ cannot write to.
 
 | | |
 | --- | --- |
-| read | `readFile`, `getSymbols` (pass `1` as depth for top level only), `getSymbolBody`, `findSymbol`, `findReferences`, `goToDefinition`, `incomingCalls`, `outgoingCalls` (true calls only), `getDependencies` (what a symbol's body needs from outside itself), `searchText`, `listFiles`, `getDiagnostics` |
+| read | `readFile`, `getSymbols` (pass `1` as depth for top level only), `getSymbolBody`, `findSymbol`, `findReferences`, `goToDefinition`, `incomingCalls`, `outgoingCalls` (true calls only), `getDependencies` (what a symbol's body needs from outside itself), `getDependencyClosure` (transitive same-file closure of seed symbols — feed it to `moveSymbols`), `searchText`, `listFiles`, `getDiagnostics` |
 | verify | `checkProject` — whole-project type check over the *buffered* state; path aliases resolve even in files created mid-script |
-| write | `moveSymbol` / `moveSymbols` (full move, single or batch: imports computed and deduped, importers repointed, source pruned), `organizeImports`, `addMissingImports`, `renameSymbol`, `replaceSymbolBody`, `insertBeforeSymbol`, `insertAfterSymbol`, `deleteSymbol`, `writeFile`, `deleteFile` |
+| write | `moveSymbol` / `moveSymbols` (full move, single or batch in any order: imports computed and deduped, importers repointed, source pruned), `organizeImports`, `addMissingImports`, `renameSymbol`, `replaceSymbolBody`, `insertBeforeSymbol`, `insertAfterSymbol`, `deleteSymbol`, `writeFile`, `deleteFile` |
 
 The tool returns `{ result, logs, changes }`. Symbols are addressed as
-`(file, "MyClass/myMethod")` pairs discovered via `getSymbols`. Full type
-definitions are embedded in the tool description (generated from source); if a
-client truncates it, `await lsp.help()` returns the complete reference.
+`(file, "MyClass/myMethod")` pairs discovered via `getSymbols`. When a script
+does something a cheaper call covers, the result (and `logs`) carries an
+advisory `[hint]`. Full type definitions are embedded in the tool description
+(generated from source); if a client truncates it, `await lsp.help()` returns
+the complete reference.
 
 See `PRD.md` for the complete spec and decision log.
 
