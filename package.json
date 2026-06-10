@@ -1,7 +1,7 @@
 {
   "name": "codemode-lsp",
-  "version": "0.3.0",
-  "description": "Semantic code intelligence + refactoring MCP for TypeScript/JS: one LSP-backed execute tool — call graphs, impact analysis, symbol dependencies, atomic multi-file refactors",
+  "version": "0.3.1",
+  "description": "Semantic code intelligence + refactoring MCP for TypeScript/JS: one LSP-backed execute tool \u2014 call graphs, impact analysis, symbol dependencies, atomic multi-file refactors",
   "keywords": [
     "mcp",
     "lsp",

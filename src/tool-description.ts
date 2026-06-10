@@ -152,6 +152,10 @@ script's last expression, JSON-serialized.
   rejected.
 - Diagnostics cover files touched this session only, never the whole project.
   \`Diagnostic.range\` is zero-based; every other line/column is 1-based.
+- On a file CREATED this script, "Cannot find module" for tsconfig path
+  aliases (\`@/...\`) is usually a false positive — the file joins the TS
+  project only once flushed to disk. Such diagnostics are tagged in-band;
+  don't roll back over them alone.
 
 ## API
 

@@ -1329,15 +1329,34 @@ export class LspApi {
   ): Diagnostic[] {
     const workspacePath = this.workspacePathFromUri(uri);
     if (!workspacePath) return [];
-    return diagnostics.map((diagnostic) => ({
-      file: workspacePath.relPath,
-      range: diagnostic.range,
-      message:
+    // A file created this script exists only in the buffer, so tsserver checks
+    // it in the INFERRED project where tsconfig "paths" aliases don't resolve.
+    // Module-not-found errors there are usually false positives (field report:
+    // a correct module split was rolled back over 6 of them) — say so in-band
+    // so the script can classify instead of blindly aborting.
+    const pendingCreation = this.buffer?.isPendingCreation(
+      workspacePath.absPath,
+    );
+    return diagnostics.map((diagnostic) => {
+      let message =
         typeof diagnostic.message === "string"
           ? diagnostic.message
-          : diagnostic.message.value,
-      severity: severityName(diagnostic.severity),
-    }));
+          : diagnostic.message.value;
+      if (pendingCreation && /Cannot find module/i.test(message)) {
+        message +=
+          " [likely a FALSE POSITIVE: this file is newly created and not yet " +
+          "on disk, so tsconfig path aliases do not resolve in it until the " +
+          "script succeeds and it is flushed. If an existing file imports the " +
+          "same module without errors, ignore this; verify with " +
+          "getDiagnostics in a follow-up call after the flush.]";
+      }
+      return {
+        file: workspacePath.relPath,
+        range: diagnostic.range,
+        message,
+        severity: severityName(diagnostic.severity),
+      };
+    });
   }
 
   private lineLooksExported(text: string, zeroBasedLine: number): boolean {

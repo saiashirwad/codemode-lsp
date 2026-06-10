@@ -90,6 +90,16 @@ export class TransactionalBuffer {
   }
 
   /**
+   * Whether the file is a creation buffered this script — open in tsserver but
+   * not yet on disk. Such files sit in tsserver's INFERRED project (the
+   * configured tsconfig project only includes files that exist on disk), so
+   * tsconfig path aliases ("@/...") do not resolve in them until flush.
+   */
+  isPendingCreation(absPath: string): boolean {
+    return this.files.get(absPath)?.state === "created";
+  }
+
+  /**
    * Current content for a tracked-or-untracked file, reflecting buffered writes.
    * Tracks the file (didOpen with disk content) on first access so subsequent
    * reads/writes share one buffer. Throws if the file was deleted this script.
@@ -267,6 +277,15 @@ export class TransactionalBuffer {
         } else if (file.state === "created") {
           mkdirSync(dirname(absPath), { recursive: true });
           writeFileSync(absPath, file.current ?? "", "utf8");
+          if (file.lspVisible) {
+            // The document was opened while it did not exist on disk, which
+            // lands it in tsserver's INFERRED project — no tsconfig "paths"
+            // aliases. Now that it exists, bounce it (didClose/didOpen with
+            // identical content) so it joins the configured project and later
+            // getDiagnostics calls resolve aliases like the rest of the repo.
+            this.client.didClose(absPath);
+            this.client.didOpen(absPath, file.current ?? "");
+          }
           changes.push({
             absPath,
             kind: "created",
