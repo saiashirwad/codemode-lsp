@@ -9,6 +9,7 @@
         "acorn": "^8.0.0",
         "vscode-jsonrpc": "^8.2.0",
         "vscode-languageserver-protocol": "^3.17.0",
+        "zod": "^3.25 || ^4.0",
       },
       "devDependencies": {
         "@biomejs/biome": "^2.0.0",

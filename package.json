@@ -4,7 +4,11 @@
   "description": "MCP server exposing a single code-mode tool backed by LSP",
   "type": "module",
   "private": true,
+  "bin": {
+    "codemode-lsp": "src/index.ts"
+  },
   "scripts": {
+    "start": "bun run src/index.ts",
     "check": "bun run typecheck && bun run lint && bun test",
     "typecheck": "tsc --noEmit",
     "lint": "biome check .",
@@ -17,7 +21,8 @@
     "@modelcontextprotocol/sdk": "^1.0.0",
     "acorn": "^8.0.0",
     "vscode-jsonrpc": "^8.2.0",
-    "vscode-languageserver-protocol": "^3.17.0"
+    "vscode-languageserver-protocol": "^3.17.0",
+    "zod": "^3.25 || ^4.0"
   },
   "devDependencies": {
     "@biomejs/biome": "^2.0.0",
