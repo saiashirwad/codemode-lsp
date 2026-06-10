@@ -5,8 +5,15 @@ import { createExecuteRunner } from "../../src/mcp-server";
 
 /** Minimal LspApi stub — the failing-warmup tests never reach an lsp.* call. */
 function stubApi(): LspApi {
+  const noopBuffer = {
+    isDirty: () => false,
+    rollback: () => {},
+    flush: () => [],
+  };
   return {
     listFiles: async () => [],
+    beginTransaction: () => noopBuffer,
+    endTransaction: () => {},
   } as unknown as LspApi;
 }
 

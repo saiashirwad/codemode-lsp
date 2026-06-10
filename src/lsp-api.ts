@@ -7,9 +7,12 @@ import type {
   Location as LspLocation,
   Range,
   SymbolInformation,
+  TextEdit,
+  WorkspaceEdit,
   WorkspaceSymbol,
 } from "vscode-languageserver-protocol";
 import { DiagnosticSeverity } from "vscode-languageserver-protocol";
+import { TransactionalBuffer } from "./buffer";
 import type { LspClient } from "./lsp-client";
 import {
   buildSymbolInfoTree,
@@ -179,6 +182,49 @@ function offsetAt(text: string, line: number, character: number): number {
   return Math.min(offset + character, text.length);
 }
 
+/**
+ * Expand a symbol's deletion range to swallow its leading JSDoc/line comments and
+ * decorators, plus trailing whitespace through the end of the line (PRD §
+ * deleteSymbol). Walks lines upward from the symbol start while they look like a
+ * comment or decorator, then extends the end to cover the trailing newline so no
+ * blank line is left behind.
+ */
+function expandDeletionRange(text: string, range: Range): Range {
+  const lines = text.split("\n");
+  let startLine = range.start.line;
+  // Absorb a contiguous block of leading comment/decorator lines.
+  for (let line = startLine - 1; line >= 0; line -= 1) {
+    const trimmed = (lines[line] ?? "").trim();
+    const isComment =
+      trimmed.startsWith("/**") ||
+      trimmed.startsWith("/*") ||
+      trimmed.startsWith("*") ||
+      trimmed.startsWith("*/") ||
+      trimmed.startsWith("//");
+    const isDecorator = trimmed.startsWith("@");
+    if (isComment || isDecorator) {
+      startLine = line;
+    } else if (trimmed === "") {
+      // Stop at a blank line: it separates this symbol from a prior one.
+      break;
+    } else {
+      break;
+    }
+  }
+  const start = { line: startLine, character: 0 };
+  // Extend the end past the symbol's last line's newline so the trailing blank
+  // line collapses. If the symbol ends mid-line, fall back to its own end.
+  let endLine = range.end.line;
+  let endChar = range.end.character;
+  // Swallow trailing whitespace on the symbol's final line and the newline.
+  const remainder = (lines[endLine] ?? "").slice(endChar);
+  if (remainder.trim() === "") {
+    endLine += 1;
+    endChar = 0;
+  }
+  return { start, end: { line: endLine, character: endChar } };
+}
+
 function severityName(severity: number | undefined): Diagnostic["severity"] {
   switch (severity) {
     case DiagnosticSeverity.Error:
@@ -222,12 +268,68 @@ export class LspApi {
   private readonly client: LspClient;
   private readonly ignoreRules: IgnoreRule[];
   private readonly rootRealPath: string;
+  private buffer: TransactionalBuffer | null = null;
 
   constructor(options: { rootDir: string; client: LspClient }) {
     this.rootDir = resolve(options.rootDir);
     this.rootRealPath = realpathSync(this.rootDir);
     this.client = options.client;
     this.ignoreRules = loadIgnoreRules(this.rootDir);
+  }
+
+  /**
+   * Begin a fresh transaction (one per `execute` script). The returned buffer
+   * holds all buffered writes; the runner flushes it on success and rolls it back
+   * on failure. Reads during the transaction reflect the buffer.
+   */
+  beginTransaction(): TransactionalBuffer {
+    const buffer = new TransactionalBuffer(this.client);
+    this.buffer = buffer;
+    return buffer;
+  }
+
+  /** End the current transaction, clearing the active buffer. */
+  endTransaction(): void {
+    this.buffer = null;
+  }
+
+  /**
+   * Read a workspace file's current content, reflecting buffered writes when a
+   * transaction is active. Throws DeletedFileError if it was deleted this script.
+   *
+   * When a buffer is active, the first read of a file opens it in the LSP server
+   * (`track`), which requires the server alive. The execute runner ensures that
+   * before any script runs; {@link ensureReadyForBuffer} covers direct-API callers.
+   */
+  private readText(resolved: ResolvedWorkspacePath): string {
+    if (this.buffer) {
+      return this.buffer.getText(resolved.absPath, resolved.relPath);
+    }
+    return readFileSync(resolved.absPath, "utf8");
+  }
+
+  /**
+   * Ensure the LSP server is alive before a buffered read opens a document. No-op
+   * outside a transaction (plain disk reads need no server).
+   */
+  private async ensureReadyForBuffer(): Promise<void> {
+    if (this.buffer) await this.client.ensureAlive();
+  }
+
+  /**
+   * Like {@link readText} but for incidental reads (reference context, search)
+   * where a deleted file should just be skipped rather than throw. Returns the
+   * buffered content for tracked files, disk content otherwise, or "" if gone.
+   */
+  private readTextSafe(resolved: ResolvedWorkspacePath): string {
+    if (this.buffer?.isDeleted(resolved.absPath)) return "";
+    try {
+      return this.readText(resolved);
+    } catch {
+      return existsSync(resolved.absPath)
+        ? readFileSync(resolved.absPath, "utf8")
+        : "";
+    }
   }
 
   resolveWorkspacePath(file: string): ResolvedWorkspacePath {
@@ -266,12 +368,14 @@ export class LspApi {
 
   async readFile(file: string): Promise<string> {
     const resolved = this.resolveWorkspacePath(file);
-    return readFileSync(resolved.absPath, "utf8");
+    await this.ensureReadyForBuffer();
+    return this.readText(resolved);
   }
 
   async getSymbolBody(file: string, symbolPath: string): Promise<string> {
     const resolved = this.resolveWorkspacePath(file);
-    const text = readFileSync(resolved.absPath, "utf8");
+    await this.ensureReadyForBuffer();
+    const text = this.readText(resolved);
     const symbols = await this.documentSymbols(resolved);
     const symbol = resolveSymbolPath({
       file: resolved.relPath,
@@ -293,7 +397,8 @@ export class LspApi {
 
   async getSymbols(file: string): Promise<SymbolInfo[]> {
     const resolved = this.resolveWorkspacePath(file);
-    const text = readFileSync(resolved.absPath, "utf8");
+    await this.ensureReadyForBuffer();
+    const text = this.readText(resolved);
     return buildSymbolInfoTree(await this.documentSymbols(resolved), text);
   }
 
@@ -342,7 +447,7 @@ export class LspApi {
     for (const location of locations) {
       const workspacePath = this.workspacePathFromUri(location.uri);
       if (!workspacePath) continue;
-      const text = readFileSync(workspacePath.absPath, "utf8");
+      const text = this.readTextSafe(workspacePath);
       const containingPath = await this.containingPathForLocation(
         workspacePath,
         location,
@@ -390,9 +495,10 @@ export class LspApi {
       throw new Error(`Invalid searchText regex "${pattern}": ${message}`);
     }
     const results: SearchResult[] = [];
+    await this.ensureReadyForBuffer();
     for (const file of await this.listFiles(glob)) {
       const resolved = this.resolveWorkspacePath(file);
-      const lines = readFileSync(resolved.absPath, "utf8").split(/\r?\n/);
+      const lines = this.readTextSafe(resolved).split(/\r?\n/);
       for (let lineIndex = 0; lineIndex < lines.length; lineIndex += 1) {
         const line = lines[lineIndex] ?? "";
         regex.lastIndex = 0;
@@ -439,7 +545,10 @@ export class LspApi {
     if (file) {
       const resolved = this.resolveWorkspacePath(file);
       await this.client.ensureAlive();
-      this.client.openTextDocument(resolved.absPath);
+      // During a transaction the file may carry buffered edits; track() opens it
+      // at buffered content rather than re-reading disk.
+      if (this.buffer) this.buffer.track(resolved.absPath);
+      else this.client.openTextDocument(resolved.absPath);
       await this.client.waitForDiagnosticsForUris([resolved.uri]);
       return this.convertDiagnosticsForUri(
         resolved.uri,
@@ -454,6 +563,283 @@ export class LspApi {
           this.client.getDiagnosticsForUris([uri]),
         ),
       );
+  }
+
+  // ---- Write operations (Phase 4) -----------------------------------------
+  // All require an active transaction (begun by the execute runner). Each routes
+  // its edit through the buffer (didChange), then collects fresh diagnostics for
+  // the affected files (≤2s wait) so the write-check-fix loop fits in one script.
+
+  async renameSymbol(
+    file: string,
+    symbolPath: string,
+    newName: string,
+  ): Promise<WriteResult> {
+    const buffer = this.requireBuffer("renameSymbol");
+    const resolved = this.resolveWorkspacePath(file);
+    const symbol = resolveSymbolPath({
+      file: resolved.relPath,
+      symbolPath,
+      symbols: await this.documentSymbols(resolved),
+    });
+    // prepareRename validates the position is renameable; surface its rejection
+    // as an LLM-readable error rather than letting rename silently no-op.
+    let prepared: unknown;
+    try {
+      prepared = await this.client.prepareRename({
+        uri: resolved.uri,
+        position: symbol.selectionRange.start,
+      });
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      throw new Error(
+        `Cannot rename "${symbolPath}" in "${resolved.relPath}": ${message}`,
+      );
+    }
+    if (prepared === null) {
+      throw new Error(
+        `Symbol "${symbolPath}" in "${resolved.relPath}" cannot be renamed at this position.`,
+      );
+    }
+    // Open every file that references the symbol so tsserver includes them in the
+    // rename's WorkspaceEdit. Cross-file rename only fans out to documents the
+    // server has in its project view; references that live in unopened files are
+    // otherwise missed (PRD § Rename fan-out is the highest-risk operation). The
+    // cross-file index is built lazily, so the first references call after warmup
+    // can return only the origin file (PRD Risk #2) — poll until it stabilizes.
+    await this.warmReferenceIndex(
+      resolved,
+      symbol.selectionRange.start,
+      buffer,
+    );
+    const edit = await this.client.rename({
+      uri: resolved.uri,
+      position: symbol.selectionRange.start,
+      newName,
+    });
+    const editsByPath = this.workspaceEditToEdits(edit);
+    if (editsByPath.size === 0) {
+      throw new Error(
+        `Rename of "${symbolPath}" in "${resolved.relPath}" produced no edits.`,
+      );
+    }
+    const affected: string[] = [];
+    for (const [absPath, edits] of editsByPath) {
+      buffer.applyEdits(absPath, edits);
+      affected.push(absPath);
+    }
+    const filesChanged = affected
+      .map((absPath) => this.relPathFor(absPath))
+      .sort();
+    const diagnostics = await this.collectDiagnostics(affected);
+    return { file: resolved.relPath, filesChanged, diagnostics };
+  }
+
+  async replaceSymbolBody(
+    file: string,
+    symbolPath: string,
+    newText: string,
+  ): Promise<WriteResult> {
+    return this.editSymbolRange(file, symbolPath, (symbol) => ({
+      range: symbol.range,
+      newText,
+    }));
+  }
+
+  async insertBeforeSymbol(
+    file: string,
+    symbolPath: string,
+    text: string,
+  ): Promise<WriteResult> {
+    // Anchor to column 0 of the symbol's start line so the inserted block lands on
+    // its own line(s) above the whole declaration — not mid-line after a leading
+    // `export const` (a symbol's range often starts at the name, not the modifier).
+    return this.editSymbolRange(file, symbolPath, (symbol) => ({
+      range: {
+        start: { line: symbol.range.start.line, character: 0 },
+        end: { line: symbol.range.start.line, character: 0 },
+      },
+      newText: text.endsWith("\n") ? text : `${text}\n`,
+    }));
+  }
+
+  async insertAfterSymbol(
+    file: string,
+    symbolPath: string,
+    text: string,
+  ): Promise<WriteResult> {
+    // Anchor just past the end of the symbol's last line.
+    return this.editSymbolRange(file, symbolPath, (symbol) => ({
+      range: { start: symbol.range.end, end: symbol.range.end },
+      newText: text.startsWith("\n") ? text : `\n${text}`,
+    }));
+  }
+
+  async deleteSymbol(file: string, symbolPath: string): Promise<WriteResult> {
+    const buffer = this.requireBuffer("deleteSymbol");
+    const resolved = this.resolveWorkspacePath(file);
+    await this.client.ensureAlive();
+    const text = this.readText(resolved);
+    const symbol = resolveSymbolPath({
+      file: resolved.relPath,
+      symbolPath,
+      symbols: await this.documentSymbols(resolved),
+    });
+    const range = expandDeletionRange(text, symbol.range);
+    buffer.applyEdits(resolved.absPath, [{ range, newText: "" }]);
+    const diagnostics = await this.collectDiagnostics([resolved.absPath]);
+    return {
+      file: resolved.relPath,
+      filesChanged: [resolved.relPath],
+      diagnostics,
+    };
+  }
+
+  async writeFile(file: string, content: string): Promise<WriteResult> {
+    const buffer = this.requireBuffer("writeFile");
+    const resolved = this.resolveWorkspacePath(file);
+    await this.client.ensureAlive();
+    buffer.writeFile(resolved.absPath, content);
+    const diagnostics = await this.collectDiagnostics([resolved.absPath]);
+    return {
+      file: resolved.relPath,
+      filesChanged: [resolved.relPath],
+      diagnostics,
+    };
+  }
+
+  async deleteFile(file: string): Promise<WriteResult> {
+    const buffer = this.requireBuffer("deleteFile");
+    const resolved = this.resolveWorkspacePath(file);
+    await this.client.ensureAlive();
+    // Touch tracking so other touched files' diagnostics still resolve, but the
+    // deleted file itself has no diagnostics.
+    buffer.deleteFile(resolved.absPath, resolved.relPath);
+    return {
+      file: resolved.relPath,
+      filesChanged: [resolved.relPath],
+      diagnostics: [],
+    };
+  }
+
+  /**
+   * Poll `textDocument/references` until the set of referencing files stabilizes
+   * (same set twice in a row) or a bound elapses, opening each referencing file in
+   * the buffer so tsserver indexes it for the upcoming rename. Mitigates the
+   * cold-start incompleteness where the first references call returns only the
+   * origin file (PRD Risk #2).
+   */
+  private async warmReferenceIndex(
+    resolved: ResolvedWorkspacePath,
+    position: { line: number; character: number },
+    buffer: TransactionalBuffer,
+    timeoutMs = 3_000,
+  ): Promise<void> {
+    const started = Date.now();
+    const union = new Set<string>();
+    let stablePolls = 0;
+    // Require the referencing-file set to stop growing for a few consecutive polls
+    // before trusting it, so the cold index (which reports the origin file first,
+    // then cross-file references a few hundred ms later) has time to fill in.
+    while (Date.now() - started < timeoutMs) {
+      const refs = await this.client.references({
+        uri: resolved.uri,
+        position,
+      });
+      let grew = false;
+      for (const ref of refs) {
+        const refPath = this.workspacePathFromUri(ref.uri);
+        if (refPath && !union.has(refPath.absPath)) {
+          union.add(refPath.absPath);
+          buffer.track(refPath.absPath);
+          grew = true;
+        }
+      }
+      stablePolls = grew ? 0 : stablePolls + 1;
+      if (stablePolls >= 3) return;
+      await new Promise((resolve) => setTimeout(resolve, 150));
+    }
+  }
+
+  private requireBuffer(op: string): TransactionalBuffer {
+    if (!this.buffer) {
+      throw new Error(
+        `Write operation "${op}" requires an active transaction. This is an ` +
+          "internal error: write ops must run inside an execute script.",
+      );
+    }
+    return this.buffer;
+  }
+
+  private async editSymbolRange(
+    file: string,
+    symbolPath: string,
+    build: (symbol: { range: Range }) => TextEdit,
+  ): Promise<WriteResult> {
+    const buffer = this.requireBuffer("editSymbolRange");
+    const resolved = this.resolveWorkspacePath(file);
+    const symbol = resolveSymbolPath({
+      file: resolved.relPath,
+      symbolPath,
+      symbols: await this.documentSymbols(resolved),
+    });
+    buffer.applyEdits(resolved.absPath, [build({ range: symbol.range })]);
+    const diagnostics = await this.collectDiagnostics([resolved.absPath]);
+    return {
+      file: resolved.relPath,
+      filesChanged: [resolved.relPath],
+      diagnostics,
+    };
+  }
+
+  private workspaceEditToEdits(
+    edit: WorkspaceEdit | null,
+  ): Map<string, TextEdit[]> {
+    const byPath = new Map<string, TextEdit[]>();
+    if (!edit) return byPath;
+    const add = (uri: string, edits: TextEdit[]): void => {
+      const workspacePath = this.workspacePathFromUri(uri);
+      if (!workspacePath) return;
+      const existing = byPath.get(workspacePath.absPath) ?? [];
+      existing.push(...edits);
+      byPath.set(workspacePath.absPath, existing);
+    };
+    if (edit.changes) {
+      for (const [uri, edits] of Object.entries(edit.changes)) add(uri, edits);
+    }
+    if (edit.documentChanges) {
+      for (const change of edit.documentChanges) {
+        if ("textDocument" in change && "edits" in change) {
+          add(
+            change.textDocument.uri,
+            change.edits.filter(
+              (e): e is TextEdit => "range" in e && "newText" in e,
+            ),
+          );
+        }
+      }
+    }
+    return byPath;
+  }
+
+  /**
+   * Wait ≤2s for fresh publishDiagnostics for the affected files, then return
+   * their diagnostics (PRD § Diagnostics collection). The buffer has already
+   * sent didChange, so tsserver re-publishes for these URIs.
+   */
+  private async collectDiagnostics(absPaths: string[]): Promise<Diagnostic[]> {
+    const uris = absPaths.map((absPath) => pathToFileURL(absPath).href);
+    await this.client.waitForDiagnosticsForUris(uris);
+    return uris.flatMap((uri) =>
+      this.convertDiagnosticsForUri(
+        uri,
+        this.client.getDiagnosticsForUris([uri]),
+      ),
+    );
+  }
+
+  private relPathFor(absPath: string): string {
+    return toPosixPath(relative(this.rootDir, absPath));
   }
 
   /**

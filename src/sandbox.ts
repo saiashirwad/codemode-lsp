@@ -61,13 +61,14 @@ export interface SandboxOptions {
   lsp: LspApi;
   /** Script timeout in ms. Defaults to {@link DEFAULT_TIMEOUT_MS}. */
   timeoutMs?: number;
+  /**
+   * When true, the 7 write ops are absent from the sandbox `lsp` object entirely
+   * (CODEMODE_READONLY). Read ops + getDiagnostics remain. Defaults to false.
+   */
+  readonly?: boolean;
 }
 
-/**
- * The `lsp.*` methods exposed to scripts in Phase 3 (read ops + getDiagnostics).
- * Write ops are Phase 4 and are deliberately absent from this list so they never
- * reach the sandbox surface.
- */
+/** Read ops + getDiagnostics — always exposed, even under CODEMODE_READONLY. */
 const READ_OP_NAMES = [
   "readFile",
   "getSymbolBody",
@@ -80,7 +81,18 @@ const READ_OP_NAMES = [
   "getDiagnostics",
 ] as const;
 
-type ReadOpName = (typeof READ_OP_NAMES)[number];
+/** The 7 write ops — absent from the sandbox under CODEMODE_READONLY. */
+const WRITE_OP_NAMES = [
+  "renameSymbol",
+  "replaceSymbolBody",
+  "insertBeforeSymbol",
+  "insertAfterSymbol",
+  "deleteSymbol",
+  "writeFile",
+  "deleteFile",
+] as const;
+
+type OpName = (typeof READ_OP_NAMES)[number] | (typeof WRITE_OP_NAMES)[number];
 
 /** Render an argument for a trace line. Strings are quoted; everything else JSON-ish. */
 function renderArg(value: unknown): string {
@@ -143,12 +155,11 @@ function buildTracedLsp(
   makeSandboxError: (message: string) => Error,
   /** Lift a host async impl into a sandbox-realm async function. */
   wrapAsync: AsyncWrapperFactory,
-): Record<ReadOpName, (...args: unknown[]) => Promise<unknown>> {
-  const traced = {} as Record<
-    ReadOpName,
-    (...args: unknown[]) => Promise<unknown>
-  >;
-  for (const name of READ_OP_NAMES) {
+  /** The op names to expose. Excludes write ops under CODEMODE_READONLY. */
+  opNames: readonly OpName[],
+): Record<string, (...args: unknown[]) => Promise<unknown>> {
+  const traced: Record<string, (...args: unknown[]) => Promise<unknown>> = {};
+  for (const name of opNames) {
     const fn = (api as unknown as Record<string, unknown>)[name];
     if (typeof fn !== "function") continue;
     const bound = (fn as (...a: unknown[]) => Promise<unknown>).bind(api);
@@ -308,8 +319,16 @@ function serializeResult(value: unknown): string {
   return serialized;
 }
 
-/** Format the operation trace per PRD § Errors (completed: / failed at: lines). */
-export function formatTrace(entries: TraceEntry[]): string {
+/** Exact rollback sentence appended to a failed script's trace (PRD § Errors). */
+export const ROLLBACK_TRACE_LINE =
+  "All buffered changes were rolled back; the codebase is unchanged.";
+
+/**
+ * Format the operation trace per PRD § Errors (completed: / failed at: lines).
+ * When `rolledBack` is true (the failed script had buffered writes that were
+ * rolled back), the exact rollback sentence is appended.
+ */
+export function formatTrace(entries: TraceEntry[], rolledBack = false): string {
   const completed = entries.filter((entry) => !entry.failed);
   const failed = entries.find((entry) => entry.failed);
   const lines: string[] = [];
@@ -331,9 +350,7 @@ export function formatTrace(entries: TraceEntry[]): string {
       `  ${completed.length + 1}. ${failed.op}(${failed.args.join(", ")}) → ${failed.outcome}`,
     );
   }
-  // NOTE (Phase 4 seam): the rollback sentence ("All buffered changes were
-  // rolled back; the codebase is unchanged.") is appended here once transactional
-  // writes land. Read-only Phase 3 ends at the failed-at line.
+  if (rolledBack) lines.push(ROLLBACK_TRACE_LINE);
 
   return lines.join("\n");
 }
@@ -415,7 +432,16 @@ export async function runSandbox(
     warn: wrapSync(recordLog("warn")),
     error: wrapSync(recordLog("error")),
   };
-  sandbox.lsp = buildTracedLsp(options.lsp, trace, makeSandboxError, wrapAsync);
+  const opNames: OpName[] = options.readonly
+    ? [...READ_OP_NAMES]
+    : [...READ_OP_NAMES, ...WRITE_OP_NAMES];
+  sandbox.lsp = buildTracedLsp(
+    options.lsp,
+    trace,
+    makeSandboxError,
+    wrapAsync,
+    opNames,
+  );
 
   const { source } = normalizeCode(code);
   // Wrap in an async IIFE; the returned Promise is awaited here (auto-await).

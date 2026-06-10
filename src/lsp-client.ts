@@ -23,6 +23,7 @@ import type {
   Position,
   PublishDiagnosticsParams,
   SymbolInformation,
+  WorkspaceEdit,
   WorkspaceSymbol,
 } from "vscode-languageserver-protocol";
 
@@ -252,15 +253,85 @@ export class LspClient {
   openTextDocument(abs: string): void {
     const uri = pathToFileURL(abs).href;
     if (this.openVersions.has(uri)) return;
+    const text = readFileSync(abs, "utf8");
+    this.didOpen(abs, text);
+  }
+
+  /**
+   * Open a document with explicit content (rather than reading disk). Used by the
+   * transactional buffer to open files at their original disk content or to open
+   * a *created* file's new content. No-op if the URI is already open.
+   */
+  didOpen(abs: string, text: string): void {
+    const uri = pathToFileURL(abs).href;
+    if (this.openVersions.has(uri)) return;
     const conn = this.connection;
     if (!conn || !this.isAlive()) throw new Error("LSP not started");
-    const text = readFileSync(abs, "utf8");
     const languageId = abs.endsWith(".tsx") ? "typescriptreact" : "typescript";
     conn.sendNotification("textDocument/didOpen", {
       textDocument: { uri, languageId, version: 1, text },
     });
     this.openVersions.set(uri, 1);
     this.touchedUris.add(uri);
+  }
+
+  /**
+   * Send a full-document `didChange` (version incremented). The document must be
+   * open. Returns the new version. Used by the buffer on every write and on
+   * rollback (didChange back to the original — never close/reopen, which leaves
+   * tsserver stale; see PRD § Transactional Writes).
+   */
+  didChangeFullText(abs: string, text: string): number {
+    const uri = pathToFileURL(abs).href;
+    const conn = this.connection;
+    if (!conn || !this.isAlive()) throw new Error("LSP not started");
+    const current = this.openVersions.get(uri);
+    if (current === undefined) {
+      throw new Error(`Cannot didChange a document that is not open: ${uri}`);
+    }
+    const version = current + 1;
+    conn.sendNotification("textDocument/didChange", {
+      textDocument: { uri, version },
+      contentChanges: [{ text }],
+    });
+    this.openVersions.set(uri, version);
+    this.touchedUris.add(uri);
+    return version;
+  }
+
+  /** Send `didClose` and forget the document's version. No-op if not open. */
+  didClose(abs: string): void {
+    const uri = pathToFileURL(abs).href;
+    if (!this.openVersions.has(uri)) return;
+    const conn = this.connection;
+    if (!conn || !this.isAlive()) throw new Error("LSP not started");
+    conn.sendNotification("textDocument/didClose", {
+      textDocument: { uri },
+    });
+    this.openVersions.delete(uri);
+  }
+
+  isOpen(abs: string): boolean {
+    return this.openVersions.has(pathToFileURL(abs).href);
+  }
+
+  async rename(
+    params: UriPosition & { newName: string },
+  ): Promise<WorkspaceEdit | null> {
+    await this.ensureAlive();
+    return this.request<WorkspaceEdit | null>("textDocument/rename", {
+      textDocument: { uri: params.uri },
+      position: params.position,
+      newName: params.newName,
+    });
+  }
+
+  async prepareRename(params: UriPosition): Promise<unknown> {
+    await this.ensureAlive();
+    return this.request<unknown>("textDocument/prepareRename", {
+      textDocument: { uri: params.uri },
+      position: params.position,
+    });
   }
 
   getOpenDocumentVersion(abs: string): number | undefined {
@@ -458,6 +529,8 @@ export class LspClient {
           documentSymbol: { hierarchicalDocumentSymbolSupport: true },
           definition: { linkSupport: false },
           references: {},
+          rename: { prepareSupport: true },
+          synchronization: { didSave: false, willSave: false },
           // typescript-language-server 4.x only pushes textDocument/
           // publishDiagnostics when the client advertises support for it.
           // Without this, getDiagnostics never sees the fixture's type error.
