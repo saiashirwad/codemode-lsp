@@ -106,7 +106,7 @@ export function renderLspTypes(readonly: boolean): string {
     ? LSP_COMMON_INTERFACES
     : `${LSP_COMMON_INTERFACES}\n\n${LSP_WRITE_INTERFACES}`;
   const helpOp =
-    "  /** This full API reference as a string — call it if this description was truncated. */\n  help(): Promise<string>;";
+    "  /** This full API reference as a string — call it if this description was truncated. */\n  help(): Promise<string>;\n  /** Searchable docs — no argument lists every op with a one-liner; an op-name/keyword query returns full signatures, related types, and a worked example. */\n  docs(query?: string): Promise<string>;";
   const ops = readonly
     ? `${LSP_READ_OP_SIGNATURES}\n\n${helpOp}`
     : `${LSP_READ_OP_SIGNATURES}\n\n  // Write operations — buffered, applied atomically when the script succeeds.\n${LSP_WRITE_OP_SIGNATURES}\n\n${helpOp}`;
@@ -119,7 +119,8 @@ change X"), call graphs, usage audits, and atomic multi-file refactors — it
 RESOLVES names where grep only matches text, in one call instead of many
 search/read round trips. For a single-file peek, plain file reads are cheaper.
 If this description looks truncated, run the script \`await lsp.help()\` — it
-returns this complete reference. Ops — {{opInventory}}.
+returns this complete reference — or \`await lsp.docs("<op or keyword>")\` for
+just the matching signatures, types, and an example. Ops — {{opInventory}}.
 
 Write one script that chains lsp.* calls — filter, loop, and branch in code
 instead of across many tool calls. The sandbox provides \`lsp\`,

@@ -269,6 +269,72 @@ describe("lsp.help", () => {
   });
 });
 
+describe("lsp.docs", () => {
+  test("passes the query through to docsLookup", async () => {
+    const queries: Array<string | undefined> = [];
+    const { result } = await runSandbox('await lsp.docs("moveSymbols")', {
+      lsp: stubApi(),
+      docsLookup: (query) => {
+        queries.push(query);
+        return `DOCS FOR ${query}`;
+      },
+    });
+    expect(JSON.parse(result)).toBe("DOCS FOR moveSymbols");
+    expect(queries).toEqual(["moveSymbols"]);
+  });
+
+  test("no query reaches docsLookup as undefined", async () => {
+    const queries: Array<string | undefined> = [];
+    await runSandbox("await lsp.docs()", {
+      lsp: stubApi(),
+      docsLookup: (query) => {
+        queries.push(query);
+        return "INVENTORY";
+      },
+    });
+    expect(queries).toEqual([undefined]);
+  });
+
+  test("falls back to the help text when no docsLookup is configured", async () => {
+    const { result } = await runSandbox("await lsp.docs()", {
+      lsp: stubApi(),
+      helpText: "FULL API REFERENCE",
+    });
+    expect(JSON.parse(result)).toBe("FULL API REFERENCE");
+  });
+
+  test("a non-string query throws a catchable signature error", async () => {
+    const { result } = await runSandbox(
+      "let msg; try { await lsp.docs(42); msg = 'no-throw'; } catch (e) { msg = e.message; }\nmsg",
+      { lsp: stubApi(), docsLookup: () => "DOCS" },
+    );
+    expect(JSON.parse(result)).toContain('"query" must be a string');
+  });
+
+  test("docs calls are recorded in the operation trace", async () => {
+    const { traceEntries } = await runSandbox('await lsp.docs("move")', {
+      lsp: stubApi(),
+      docsLookup: () => "DOCS",
+    });
+    expect(traceEntries.map((entry) => entry.op)).toEqual(["docs"]);
+    expect(traceEntries[0]?.args).toEqual(['"move"']);
+  });
+});
+
+describe("success trace", () => {
+  test("traceEntries are returned on success for telemetry", async () => {
+    const { traceEntries } = await runSandbox(
+      'await lsp.listFiles(); await lsp.readFile("a.ts")',
+      { lsp: stubApi() },
+    );
+    expect(traceEntries.map((entry) => entry.op)).toEqual([
+      "listFiles",
+      "readFile",
+    ]);
+    expect(traceEntries.every((entry) => !entry.failed)).toBe(true);
+  });
+});
+
 describe("timeout", () => {
   test("an async-hanging script fails with a timeout error", async () => {
     await expect(

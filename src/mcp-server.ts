@@ -3,6 +3,7 @@ import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import type { Transport } from "@modelcontextprotocol/sdk/shared/transport.js";
 import { z } from "zod";
 import { unifiedDiff } from "./diff";
+import { renderDocs } from "./docs";
 import { LspApi } from "./lsp-api";
 import { LspClient } from "./lsp-client";
 import {
@@ -12,6 +13,11 @@ import {
   runSandbox,
   SandboxError,
 } from "./sandbox";
+import {
+  createTelemetry,
+  resolveTelemetryPath,
+  type Telemetry,
+} from "./telemetry";
 import { buildToolDescription } from "./tool-description";
 
 /** A single flushed change with a reviewable unified diff (PRD § The execute Tool). */
@@ -68,6 +74,10 @@ export interface ExecuteToolDeps {
   readonly?: boolean;
   /** Full API reference served by `lsp.help()` (defaults to the tool description). */
   helpText?: string;
+  /** Backs `lsp.docs(query?)` (defaults to renderDocs over the generated types). */
+  docsLookup?: (query?: string) => string;
+  /** Opt-in JSONL usage log (CODEMODE_TELEMETRY); absent = disabled. */
+  telemetry?: Telemetry;
 }
 
 /**
@@ -90,6 +100,7 @@ export function createExecuteRunner(deps: ExecuteToolDeps): {
       // Begin a fresh transaction per script. Reads reflect buffered writes; the
       // buffer is flushed on success and rolled back on failure.
       const buffer = deps.api.beginTransaction();
+      const startedAt = Date.now();
       try {
         if (!warmedUp) {
           await deps.warmup;
@@ -101,20 +112,28 @@ export function createExecuteRunner(deps: ExecuteToolDeps): {
         // than a raw MCP protocol error.
         await deps.client.ensureAlive();
 
-        const { result, logs } = await runSandbox(code, {
+        const { result, logs, traceEntries } = await runSandbox(code, {
           lsp: deps.api,
           timeoutMs: deps.timeoutMs,
           readonly: deps.readonly,
           helpText:
             deps.helpText ?? buildToolDescription(deps.readonly ?? false),
+          docsLookup:
+            deps.docsLookup ??
+            ((query) => renderDocs(deps.readonly ?? false, query)),
         });
         // Advisory hints ride in `logs` so the model sees them even when the
         // script's return value drops the op results they were attached to.
-        const hints = deps.api
-          .takeHints()
-          .map((hint) => `[hint] ${hint}`)
-          .join("\n");
+        const hintList = deps.api.takeHints();
+        const hints = hintList.map((hint) => `[hint] ${hint}`).join("\n");
         const logsWithHints = [logs, hints].filter(Boolean).join("\n");
+        deps.telemetry?.record({
+          ts: new Date().toISOString(),
+          ok: true,
+          durationMs: Date.now() - startedAt,
+          ops: traceEntries,
+          hints: hintList,
+        });
         // Success → flush buffered writes to disk, producing reviewable diffs.
         const flushed = buffer.flush();
         const changes: Change[] = flushed.map((change) => ({
@@ -141,6 +160,14 @@ export function createExecuteRunner(deps: ExecuteToolDeps): {
         buffer.rollback();
         if (error instanceof SandboxError) {
           const { failure } = error;
+          deps.telemetry?.record({
+            ts: new Date().toISOString(),
+            ok: false,
+            durationMs: Date.now() - startedAt,
+            ops: failure.traceEntries,
+            hints: [],
+            error: failure.error,
+          });
           // Re-format the trace with the rollback sentence when writes were
           // buffered (PRD § Errors). Surface it alongside the LLM-targeted error.
           const trace = formatTrace(failure.traceEntries, wasDirty);
@@ -154,6 +181,14 @@ export function createExecuteRunner(deps: ExecuteToolDeps): {
           };
         }
         const message = error instanceof Error ? error.message : String(error);
+        deps.telemetry?.record({
+          ts: new Date().toISOString(),
+          ok: false,
+          durationMs: Date.now() - startedAt,
+          ops: [],
+          hints: [],
+          error: message,
+        });
         return { result: message, logs: "", changes: [] as Change[] };
       } finally {
         deps.api.endTransaction();
@@ -229,6 +264,8 @@ export function createServer(options: CreateServerOptions = {}): CreatedServer {
     rootDir,
     readonly,
     helpText: description,
+    docsLookup: (query) => renderDocs(readonly, query),
+    telemetry: createTelemetry(resolveTelemetryPath()),
   });
 
   const server = new McpServer({

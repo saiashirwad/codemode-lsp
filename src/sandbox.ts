@@ -41,6 +41,8 @@ export interface SandboxResult {
   result: string;
   /** Captured console output, in order (truncated at the cap). */
   logs: string;
+  /** Every lsp.* call the script made, in order — kept on success for telemetry. */
+  traceEntries: TraceEntry[];
 }
 
 export interface SandboxFailure {
@@ -76,6 +78,12 @@ export interface SandboxOptions {
    * a whole invocation probing signatures it should have been handed).
    */
   helpText?: string;
+  /**
+   * Backs `lsp.docs(query?)` — searchable docs (no query = op inventory; a
+   * keyword query = full signatures + types + example). Defaults to serving
+   * `helpText` for any call when absent.
+   */
+  docsLookup?: (query?: string) => string;
 }
 
 /** Read ops + getDiagnostics — always exposed, even under CODEMODE_READONLY. */
@@ -552,6 +560,29 @@ export async function runSandbox(
   (sandbox.lsp as Record<string, unknown>).help = wrapAsync(
     async () => helpText,
   );
+  // Searchable docs meta-op. Traced (unlike help) so telemetry sees which
+  // queries models run — that's the gap-finding signal docs() exists for.
+  const docsLookup = options.docsLookup ?? (() => helpText);
+  (sandbox.lsp as Record<string, unknown>).docs = wrapAsync(
+    async (query?: unknown) => {
+      if (query !== undefined && typeof query !== "string") {
+        throw makeSandboxError(
+          'docs(query?): "query" must be a string when given, but got ' +
+            `${typeof query}. Example: await lsp.docs("moveSymbols").`,
+        );
+      }
+      const entry: TraceEntry = {
+        op: "docs",
+        args: query === undefined ? [] : [renderArg(query)],
+        outcome: "",
+        failed: false,
+      };
+      trace.push(entry);
+      const text = docsLookup(query);
+      entry.outcome = describeOutcome(text);
+      return text;
+    },
+  );
 
   const { source, uncapturedLastStatement } = normalizeCode(code);
   // Wrap in an async IIFE; the returned Promise is awaited here (auto-await).
@@ -627,5 +658,6 @@ export async function runSandbox(
   return {
     result: capText(result, RESULT_CHAR_CAP, RESULT_TRUNCATION_MARKER),
     logs: buildLogs(),
+    traceEntries: trace,
   };
 }

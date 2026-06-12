@@ -53,7 +53,8 @@ The tool returns `{ result, logs, changes }`. Symbols are addressed as
 does something a cheaper call covers, the result (and `logs`) carries an
 advisory `[hint]`. Full type definitions are embedded in the tool description
 (generated from source); if a client truncates it, `await lsp.help()` returns
-the complete reference.
+the complete reference and `await lsp.docs("query")` returns just the matching
+op signatures, related types, and a worked example.
 
 See `PRD.md` for the complete spec and decision log.
 
@@ -64,6 +65,7 @@ See `PRD.md` for the complete spec and decision log.
 | `CODEMODE_TIMEOUT_MS` | `60000` | Script timeout |
 | `CODEMODE_LSP_BIN` | bundled server | Language server command |
 | `CODEMODE_READONLY` | unset | `1`/`true` removes the write ops entirely |
+| `CODEMODE_TELEMETRY` | unset | File path: append one JSONL usage event per `execute` (ops run, docs queries, hints, errors) |
 
 ## Limitations
 
